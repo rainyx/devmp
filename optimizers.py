@@ -37,7 +37,7 @@ class _DefUseChain:
         del self._uses[i]
 
 
-class VMHandlerOptimizer:
+class VMOptimizer:
 
     @classmethod
     def _asm_mov_reg_imm(cls, reg: X86Reg, imm: int):
@@ -56,43 +56,37 @@ class VMHandlerOptimizer:
         reversed_regs.add(X86Reg.RSP)
         reversed_regs.add(state.vsp_reg)
 
-        ja_idx = o_ic.next_index(0, cs_x86.X86_INS_JA)
-        if ja_idx != -1:
-            o_ic.resize(ja_idx)
-            # print("Found JA")
-
         def _is_reversed_reg(r):
             return r != cs_x86.X86_REG_INVALID and X86Reg.from_capstone(r).extended in reversed_regs
 
         candidates = []
         for inst in o_ic:
-
-            is_side_effect_inst = False
+            is_side_effects_inst = False
             if inst.id == cs_x86.X86_INS_PUSHFQ:
-                is_side_effect_inst = True
+                is_side_effects_inst = True
             elif imatch(inst, cs_x86.X86_INS_LEA, cs_x86.X86_OP_REG, cs_x86.X86_OP_MEM) and \
                     inst.operands[1].mem.disp == -7 and \
-                    inst.operands[1].men.scale == 1 and \
+                    inst.operands[1].mem.scale == 1 and \
                     inst.operands[1].mem.base == cs_x86.X86_REG_RIP and \
-                    inst.operands[1].men.index == cs_x86.X86_REG_INVALID:
-                is_side_effect_inst = True
+                    inst.operands[1].mem.index == cs_x86.X86_REG_INVALID:
+                is_side_effects_inst = True
             else:
                 for op in inst.operands:
                     if op.access & cs.CS_AC_WRITE:
                         if op.type == cs.CS_OP_REG:
                             if _is_reversed_reg(op.reg):
-                                is_side_effect_inst = True
-                        if op.type == cs.CS_OP_MEM:
-                            if _is_reversed_reg(op.mem.base) or _is_reversed_reg(op.mem.index):
-                                is_side_effect_inst = True
-                        if is_side_effect_inst:
+                                is_side_effects_inst = True
+                                break
+                        elif op.type == cs.CS_OP_MEM:
+                            is_side_effects_inst = True
                             break
 
-            if not is_side_effect_inst:
+            if not is_side_effects_inst:
                 candidates.append(inst)
 
             reg_uses, reg_defs = inst.regs_access()
             for reg in reg_uses:
+                # print(reg)
                 # TODO capstone_convertible
                 if not X86Reg.capstone_convertible(reg):
                     continue
@@ -110,13 +104,13 @@ class VMHandlerOptimizer:
 
         while True:
             dead_inst = None
-
-            for inst in reversed(candidates):
+            while candidates:
+                inst = candidates.pop()
                 if not def_use_chain.has_users(inst):
                     dead_inst = inst
                     break
+
             if dead_inst:
-                candidates.remove(dead_inst)
                 o_ic.remove(dead_inst)
                 def_use_chain.remove_all_uses(dead_inst)
             else:
@@ -124,13 +118,16 @@ class VMHandlerOptimizer:
 
         print("reduced")
         for inst in o_ic:
-            print(inst)
+            print("  ", inst)
 
         print("After dead code elimination: ", len(o_ic), len(ic))
         return o_ic
 
     @classmethod
     def _lower_encryption_blocks(cls, state: VMState, values: [], ic: InstructionCollection):
+        if not values:
+            return ic
+
         o_ic = ic.duplicate()
         md = get_shared_md()
 
@@ -138,14 +135,25 @@ class VMHandlerOptimizer:
         for value in values:  # type: VMEncryptedValue
             asm_code = cls._asm_mov_reg_imm(value.def_reg, value.decrypted_value)
             load_c_inst = next(md.disasm(asm_code, ic[value.blk_end - diff_sz].address))
+            # for idx in range(len(o_ic)):
+            #     print(f"{idx}: {o_ic[idx]}")
+            # print("  ", value.blk_start - diff_sz, value.blk_end - diff_sz)
             diff_sz += o_ic.replace_with(value.blk_start - diff_sz, value.blk_end - diff_sz, [load_c_inst])
 
         print("After lower encryption blocks: ", len(o_ic), len(ic))
+        # for inst in o_ic:
+        #     print("  ", inst)
         return o_ic
 
     @classmethod
     def process(cls, state: VMState, values: [], ic: InstructionCollection):
-        o_ic = cls._lower_encryption_blocks(state, values, ic)
+        o_ic = ic.duplicate()
+        ja_idx = ic.next_index(0, cs_x86.X86_INS_JA)
+        if ja_idx != -1:
+            # print("Found JA, ", ja_idx, len(o_ic))
+            o_ic.resize(ja_idx)
+
+        o_ic = cls._lower_encryption_blocks(state, values, o_ic)
         o_ic = cls._dead_code_elimination(state, o_ic)
         return o_ic
 

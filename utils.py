@@ -65,8 +65,11 @@ def get_shared_md():
     return _shared_md
 
 
-def imatch(inst, inst_id, *op_types):
-    if inst.id != inst_id:
+def imatch(inst, inst_ids, *op_types):
+    if type(inst_ids) is not list:
+        inst_ids = [inst_ids]
+
+    if inst.id not in inst_ids:
         return False
     if op_types:
         if len(inst.operands) < len(op_types):
@@ -264,8 +267,18 @@ class InstructionCollection:
     def resize(self, new_size):
         self._insts = self._insts[:new_size]
 
+    def tail_from(self, begin_idx):
+        return self.__class__(self._insts[begin_idx:])
+
+    def range_of(self, begin_idx, end_idx):
+        return self.__class__(self._insts[begin_idx:end_idx])
+
     def __getitem__(self, item):
         return self._insts[item]
 
     def __len__(self):
         return len(self._insts)
+
+    def __add__(self, other):
+        return self.__class__(self._insts + other._insts)
+

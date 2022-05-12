@@ -7,7 +7,6 @@ import capstone.x86 as cs_x86
 import lief
 
 from entities import VMState, VMHandler
-from architecture import VMPInstruction
 from subroutines import VMEntryParser, VMHandlerParser
 from utils import imatch, InstructionCollection, Mod2NInt, get_shared_md
 
@@ -92,13 +91,14 @@ class VMP:
 
     def _unroll(self, state: VMState, handler_rva: int):
         while True:
+            print(f"Unroll 0x{handler_rva:x} VIP: 0x{state.vip_rva:x} VRK: 0x{state.rolling_key:x}")
             ic = self._deobfuscate(handler_rva, debug=False)
             handler = VMHandlerParser.parse(state, ic)
-            print(f"Unroll 0x{handler.rva:x}, next: 0x{handler.next_rva:x}")
-            for param in handler.parameters:
-                print(param)
+            # for param in handler.parameters:
+            #     print(param)
             if handler.next_rva != VMHandler.INVALID_RVA:
                 handler_rva = handler.next_rva
+                # break
             else:
                 break
 
@@ -107,17 +107,10 @@ class VMP:
         ic = self._deobfuscate(vm_entry_rva)
 
         state, first_handler_rva = VMEntryParser.parse(self.binary, ic)
+        first_handler_rva = 0xafaba
+        state._vip_rva = 0x5972
+        state._rolling_key = 0xfffffffffffe3ae2
         self._unroll(state, first_handler_rva)
-
-        # vmp_handler_rva = 0x6377d
-        # state.vip_rva = 5766
-        # state.rolling_key = 0xf6b39
-
-        # vmp_handler_rva = 0xafaba
-        # state.vip_rva = 0x5972
-        # state.rolling_key = 0xfffffffffffe3ae2
-
-        # self._unroll(state, vmp_handler_rva)
 
     def process(self):
         vm_entries = self._find_vm_entries()

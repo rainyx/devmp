@@ -188,6 +188,23 @@ class VMEncryptedValue:
                f"KEY: {self.key:x} NEXT_KEY: {self.next_key:x}"
 
 
+class VMInstruction:
+    UNKNOWN_DELTA = 0x10000000
+    PANY = 0xAA
+
+    def __init__(self):
+        self.op = None
+        self.stack_delta = 0
+        self.stack_reads = []
+        self.stack_writes = []
+        self.context_writes = []
+        self.context_reads = []
+        self.parameter_sizes = []
+        self.parameters = []
+
+        self.ic = None
+
+
 class VMHandler:
     INVALID_RVA = -1
 
