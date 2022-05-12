@@ -2,11 +2,11 @@ import capstone as cs
 import capstone.x86 as cs_x86
 from lief.PE import Binary
 
-from architecture import VMArchitecture
+from instructions import VMInstructions
 from utils import InstructionCollection, xor_sized, imatch, Mod2NInt, emulate_shared
 from universal import X86Reg
-from entities import VMState, VMHandler, VMEncryptedValue
-from optimizers import VMOptimizer
+from entities import VMState, VMHandler, VMEncryptedValue, VIPDirection
+from optimizers import VMInstructionsOptimizer
 
 
 def update_vip_direction(state: VMState, cursor: int, ic: InstructionCollection):
@@ -43,11 +43,11 @@ def update_vip_direction(state: VMState, cursor: int, ic: InstructionCollection)
     forward_idx = ic.next_index_by(cursor, _forward_finder)
     backward_idx = ic.next_index_by(cursor, _backward_finder)
 
-    vip_dir = VMState.VIPDirection.UNSPECIFIED
+    vip_dir = VIPDirection.UNSPECIFIED
     if forward_idx != -1:
-        vip_dir = VMState.VIPDirection.FORWARD
+        vip_dir = VIPDirection.FORWARD
     elif backward_idx != -1:
-        vip_dir = VMState.VIPDirection.BACKWARD
+        vip_dir = VIPDirection.BACKWARD
     else:
         raise Exception("vip direction not determined")
 
@@ -286,6 +286,7 @@ class VMEntryParser:
 
         first_handler_off = next_parameter(state, vrk_i_idx + 1, ic)
         first_handler_rva = Mod2NInt.normalize(reloc_rva + first_handler_off.decrypted_value, 32)
+
         return state, first_handler_rva
 
 
@@ -303,9 +304,9 @@ class VMSwapParser:
 
         idx, def_i = ic.next_by(cursor, _finder)
         if idx == -1:
-            return -1, None
+            return None
         else:
-            return idx, X86Reg.from_capstone(def_i.operands[0].reg).extended
+            return def_i.address
 
     @classmethod
     def parse(cls, state: VMState, ic: InstructionCollection):
@@ -383,7 +384,7 @@ class VMSwapParser:
                 pfx_end = pfx_end - vip_inh[1][0]
 
             pfx_ic = ic.range_of(0, pfx_end)
-            pfx_ic = VMOptimizer.process(state, [], pfx_ic)
+            pfx_ic = VMInstructionsOptimizer.process(state, [], pfx_ic)
 
             print(f"Before swap: VSP_REG: {state.vsp_reg} VIP_REG: {state.vip_reg} VRK_REG: {state.vrk_reg}")
             state.swap(new_vsp_reg=new_vsp_reg, new_vip_reg=new_vip_reg, new_vrk_reg=new_vrk_reg)
@@ -396,11 +397,13 @@ class VMSwapParser:
 
     @classmethod
     def try_parse(cls, state: VMState, ic: InstructionCollection):
-        idx, reloc_reg = cls._find_self_ref(state, 0, ic)
+        reloc_rva = cls._find_self_ref(state, 0, ic)
+        state.set_reloc_rva(reloc_rva)
 
-        if idx != -1:
-            return cls.parse(state, ic)
-        return -1, None
+        if reloc_rva is not None:
+            idx, pfx_ic = cls.parse(state, ic)
+            return idx, pfx_ic, reloc_rva
+        return -1, None, None
 
 
 class VMHandlerParser:
@@ -418,19 +421,19 @@ class VMHandlerParser:
 
     @classmethod
     def parse(cls, state: VMState, ic: InstructionCollection):
-        swap_end_idx, prefix_ic = VMSwapParser.try_parse(state, ic)
+        swap_end_idx, prefix_ic, reloc_rva = VMSwapParser.try_parse(state, ic)
         if swap_end_idx != -1:
             ic = ic.tail_from(swap_end_idx + 1)
 
         values = list(cls._all_parameters(state, ic))
-        o_ic = VMOptimizer.process(state, values, ic)
+        o_ic = VMInstructionsOptimizer.process(state, values, ic)
         if prefix_ic:
             o_ic = prefix_ic + o_ic
 
         if len(values) == 0:
             raise Exception("no values found")
         else:
-            handler = VMHandler(rva=ic[0].address, parameters=values, ic=o_ic)
-            VMArchitecture.classify(state, o_ic)
+            v_inst = VMInstructions.classify(state, o_ic)
+            handler = VMHandler(rva=ic[0].address, v_inst=v_inst, parameters=values, ic=o_ic)
 
             return handler

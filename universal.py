@@ -91,6 +91,8 @@ class X86Reg(enum.Enum):
     RIP = 6000
     EFLAGS = 6001
 
+    SS = 7000
+
     @classmethod
     def from_capstone(cls, cs_reg):
         return _X86RegMeta[K_META_CAPSTONE2][cs_reg]
@@ -155,10 +157,14 @@ if not _X86RegMeta:
 
         X86Reg.AH: X86Reg.RAX, X86Reg.BH: X86Reg.RBX, X86Reg.CH: X86Reg.RCX, X86Reg.DH: X86Reg.RDX,
 
-        X86Reg.RIP: X86Reg.RIP, X86Reg.EFLAGS: X86Reg.EFLAGS
+        X86Reg.RIP: X86Reg.RIP, X86Reg.EFLAGS: X86Reg.EFLAGS,
+
+        X86Reg.SS: X86Reg.SS
     }
 
     _X86RegMeta[K_META_2CAPSTONE] = {
+        X86Reg.INVALID: cs_x86.X86_REG_INVALID,
+
         # 8-byte register
         X86Reg.RAX: cs_x86.X86_REG_RAX, X86Reg.RBX: cs_x86.X86_REG_RBX, X86Reg.RCX: cs_x86.X86_REG_RCX, X86Reg.RDX: cs_x86.X86_REG_RDX,
         X86Reg.RSI: cs_x86.X86_REG_RSI, X86Reg.RDI: cs_x86.X86_REG_RDI, X86Reg.RSP: cs_x86.X86_REG_RSP, X86Reg.RBP: cs_x86.X86_REG_RBP,
@@ -184,11 +190,13 @@ if not _X86RegMeta:
         X86Reg.AH: cs_x86.X86_REG_AH, X86Reg.BH: cs_x86.X86_REG_BH, X86Reg.CH: cs_x86.X86_REG_CH, X86Reg.DH: cs_x86.X86_REG_DH,
 
         X86Reg.RIP: cs_x86.X86_REG_RIP, X86Reg.EFLAGS: cs_x86.X86_REG_EFLAGS,
-        X86Reg.INVALID: cs_x86.X86_REG_INVALID
+
+        X86Reg.SS: cs_x86.X86_REG_SS
     }
     _X86RegMeta[K_META_CAPSTONE2] = dict((v, k) for k, v in _X86RegMeta[K_META_2CAPSTONE].items())
 
     _X86RegMeta[K_META_2UNICORN] = {
+        X86Reg.INVALID: uc_x86.UC_X86_REG_INVALID,
         # 8-byte register
         X86Reg.RAX: uc_x86.UC_X86_REG_RAX, X86Reg.RBX: uc_x86.UC_X86_REG_RBX, X86Reg.RCX: uc_x86.UC_X86_REG_RCX, X86Reg.RDX: uc_x86.UC_X86_REG_RDX,
         X86Reg.RSI: uc_x86.UC_X86_REG_RSI, X86Reg.RDI: uc_x86.UC_X86_REG_RDI, X86Reg.RSP: uc_x86.UC_X86_REG_RSP, X86Reg.RBP: uc_x86.UC_X86_REG_RBP,
@@ -213,7 +221,8 @@ if not _X86RegMeta:
         X86Reg.AH: uc_x86.UC_X86_REG_AH, X86Reg.BH: uc_x86.UC_X86_REG_BH, X86Reg.CH: uc_x86.UC_X86_REG_CH, X86Reg.DH: uc_x86.UC_X86_REG_DH,
 
         X86Reg.RIP: uc_x86.UC_X86_REG_RIP, X86Reg.EFLAGS: uc_x86.UC_X86_REG_EFLAGS,
-        X86Reg.INVALID: uc_x86.UC_X86_REG_INVALID
+
+        X86Reg.SS: uc_x86.UC_X86_REG_SS
     }
 
     _X86RegMeta[K_META_UNICORN2] = dict((v, k) for k, v in _X86RegMeta[K_META_2UNICORN].items())

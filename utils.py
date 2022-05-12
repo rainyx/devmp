@@ -27,6 +27,11 @@ def _create_emulator():
     mu.mem_map(stack_base, stack_size)
     mu.reg_write(uc_x86.UC_X86_REG_RSP, rsp)
 
+    def _hook_invalid_mem_access(mu, access, address, size, value, user_data):
+        print(f"Invalid memory access: {access} {address:x} {size} {value:x}")
+
+    mu.hook_add(uc.UC_HOOK_MEM_READ_UNMAPPED | uc.UC_HOOK_MEM_WRITE_UNMAPPED, _hook_invalid_mem_access)
+
     return mu
 
 

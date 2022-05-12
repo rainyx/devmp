@@ -4,7 +4,6 @@ import capstone.x86 as cs_x86
 from utils import InstructionCollection, imatch, get_shared_md, get_shared_ks
 from entities import VMEncryptedValue, VMState
 from universal import X86Reg
-import struct as st
 
 
 class _DefUseChain:
@@ -37,12 +36,12 @@ class _DefUseChain:
         del self._uses[i]
 
 
-class VMOptimizer:
+class VMInstructionsOptimizer:
 
     @classmethod
     def _asm_mov_reg_imm(cls, reg: X86Reg, imm: int):
         ks = get_shared_ks()
-        code_bytes = bytes(ks.asm(f'mov {reg.name}, 0x{imm:x}')[0])
+        code_bytes = bytes(ks.asm(f'mov {reg.extended.name}, 0x{imm:x}')[0])
         return code_bytes
 
     @classmethod
