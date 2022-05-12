@@ -2,9 +2,8 @@ import capstone as cs
 import capstone.x86 as cs_x86
 
 from utils import InstructionCollection, imatch, get_shared_md, get_shared_ks
-from entities import VMEncryptedValue, VMState
+from entities import VMState, VMDecryptedInfo
 from universal import X86Reg
-import struct as st
 
 
 class _DefUseChain:
@@ -37,7 +36,7 @@ class _DefUseChain:
         del self._uses[i]
 
 
-class VMOptimizer:
+class VMInstructionsOptimizer:
 
     @classmethod
     def _asm_mov_reg_imm(cls, reg: X86Reg, imm: int):
@@ -124,21 +123,21 @@ class VMOptimizer:
         return o_ic
 
     @classmethod
-    def _lower_encryption_blocks(cls, state: VMState, values: [], ic: InstructionCollection):
-        if not values:
+    def _lower_encryption_blocks(cls, state: VMState, decrypted_infos: [VMDecryptedInfo], ic: InstructionCollection):
+        if not decrypted_infos:
             return ic
 
         o_ic = ic.duplicate()
         md = get_shared_md()
 
         diff_sz = 0
-        for value in values:  # type: VMEncryptedValue
-            asm_code = cls._asm_mov_reg_imm(value.def_reg, value.decrypted_value)
-            load_c_inst = next(md.disasm(asm_code, ic[value.blk_end - diff_sz].address))
+        for d_info in decrypted_infos:  # type: VMDecryptedInfo
+            asm_code = cls._asm_mov_reg_imm(d_info.def_reg, d_info.value)
+            load_c_inst = next(md.disasm(asm_code, ic[d_info.i_end_index - diff_sz].address))
             # for idx in range(len(o_ic)):
             #     print(f"{idx}: {o_ic[idx]}")
             # print("  ", value.blk_start - diff_sz, value.blk_end - diff_sz)
-            diff_sz += o_ic.replace_with(value.blk_start - diff_sz, value.blk_end - diff_sz, [load_c_inst])
+            diff_sz += o_ic.replace_with(d_info.i_begin_index - diff_sz, d_info.i_end_index - diff_sz, [load_c_inst])
 
         print("After lower encryption blocks: ", len(o_ic), len(ic))
         # for inst in o_ic:

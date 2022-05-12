@@ -5,6 +5,24 @@ import unicorn.x86_const as uc_x86
 import keystone as ks
 import keystone.x86_const as ks_x86
 from universal import X86Reg
+from typing import TypeVar, Generic
+
+T = TypeVar('T')
+
+
+class IndexValuePair(Generic[T]):
+    def __init__(self, index, value: T):
+        self._index = index
+        self._value = value
+
+    @property
+    def index(self) -> int:
+        return self._index
+
+    @property
+    def value(self) -> T:
+        return self._value
+
 
 _shared_md = None
 _shared_mu = None
@@ -26,6 +44,11 @@ def _create_emulator():
     mu = uc.Uc(uc.UC_ARCH_X86, uc.UC_MODE_64)
     mu.mem_map(stack_base, stack_size)
     mu.reg_write(uc_x86.UC_X86_REG_RSP, rsp)
+
+    def _hook_invalid_mem_access(mu, access, address, size, value, user_data):
+        print(f"Invalid memory access: {access} {address:x} {size} {value:x}")
+
+    mu.hook_add(uc.UC_HOOK_MEM_READ_UNMAPPED | uc.UC_HOOK_MEM_WRITE_UNMAPPED, _hook_invalid_mem_access)
 
     return mu
 
@@ -267,8 +290,11 @@ class InstructionCollection:
     def resize(self, new_size):
         self._insts = self._insts[:new_size]
 
-    def tail_from(self, begin_idx):
+    def tail(self, begin_idx):
         return self.__class__(self._insts[begin_idx:])
+
+    def head(self, end_idx):
+        return self.__class__(self._insts[:end_idx])
 
     def range_of(self, begin_idx, end_idx):
         return self.__class__(self._insts[begin_idx:end_idx])

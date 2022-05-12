@@ -4,11 +4,14 @@ import sys
 import capstone
 import capstone as cs
 import capstone.x86 as cs_x86
+import unicorn as uc
+import unicorn.x86_const as uc_x86
 import lief
 
-from entities import VMState, VMHandler
+from entities import VMState, VMHandler, INVALID_RVA, VMBasicBlock
 from subroutines import VMEntryParser, VMHandlerParser
-from utils import imatch, InstructionCollection, Mod2NInt, get_shared_md
+from universal import X86Reg
+from utils import imatch, InstructionCollection, Mod2NInt, get_shared_md, emulate_shared
 
 vmp_bin_file_path = os.path.join(os.path.dirname(__file__), "vmtest.vmp.exe")
 
@@ -35,7 +38,7 @@ class VMP:
         # ----------------------------------------------------
         return sec.content[off] == 0x68 and sec.content[off + 5] == 0xE8
 
-    def _find_vm_entries(self):
+    def _find_vm_entries(self) -> [int]:
         vm_entries = []
         md = get_shared_md()
         for sec in self.sections:
@@ -57,15 +60,14 @@ class VMP:
                 rva += inst.size
         return vm_entries
 
-    def _deobfuscate(self, vm_handler_rva, rip_rva=None, debug=False):
+    def _deobfuscate(self, vm_handler_rva: int, debug=False) -> InstructionCollection:
         md = get_shared_md()
         sec = self._find_section(vm_handler_rva)
 
         insts = []
         off = vm_handler_rva - sec.virtual_address
 
-        if rip_rva is None:
-            rip_rva = vm_handler_rva
+        rip_rva = vm_handler_rva
         while rip_rva < sec.virtual_address + sec.virtual_size:
             off2 = min(off + 15, sec.offset + sec.size)
             inst = next(md.disasm(sec.content[off:off2].tobytes(), rip_rva))
@@ -89,18 +91,130 @@ class VMP:
 
         return InstructionCollection(insts)
 
+    def _trace_block(self, initial_state: VMState, vm_bb: VMBasicBlock):
+        from utils import get_shared_ks
+        image_base = self.binary.optional_header.imagebase
+        ks = get_shared_ks()
+        init_code = f"mov {initial_state.vsp_reg.name}, RSP\n" \
+                    f"mov {initial_state.vip_reg.name}, 0x{initial_state.vip_rva + image_base:x}\n" \
+                    f"mov {initial_state.vrk_reg.name}, 0x{initial_state.rolling_key:x}".encode('utf-8')
+
+        code_bytes = bytes(ks.asm(init_code)[0])
+        code_bytes = code_bytes + vm_bb.code_bytes
+
+        vmp_sec = self.binary.section_from_rva(initial_state.vip_rva)
+
+        stack_base = 0x0000000000000000
+        stack_size = 2 * 1024 * 1024
+        rsp = stack_base + int(stack_size / 2)
+
+        mu = uc.Uc(uc.UC_ARCH_X86, uc.UC_MODE_64)
+        mu.mem_map(stack_base, stack_size)
+        mu.reg_write(uc_x86.UC_X86_REG_RSP, rsp)
+
+        insts = vm_bb.underlying_instructions
+        inst_idx = 0
+
+        def _hook_invalid_mem_access(mu, access, address, size, value, user_data):
+            print(f"Invalid memory access: {access} address: 0x{address:08x} sz: {size} val: 0x{value:x}")
+
+        def _hook_code64(_uc, address, size, user_data):
+            nonlocal inst_idx
+            if inst_idx < 3:
+                inst_idx += 1
+                return
+            inst = insts[inst_idx-3]
+            print(f" [{inst_idx}] [{_uc.reg_read(uc_x86.UC_X86_REG_RIP):x}] {inst}")
+            for reg in [X86Reg.RSP, initial_state.vsp_reg]:
+                print(f"    {reg}: 0x{_uc.reg_read(reg.unicorn):x}")
+            reg_uses, reg_defs = inst.regs_access()
+            if reg_uses:
+                print("    ==== reg uses:")
+                for reg in reg_uses:
+                    u_reg = X86Reg.from_capstone(reg)
+                    print(f"    {u_reg}: 0x{_uc.reg_read(u_reg.unicorn):x}")
+
+            if reg_defs:
+                print("    ==== reg defs:")
+                for reg in reg_defs:
+                    u_reg = X86Reg.from_capstone(reg)
+                    print(f"    {u_reg}")
+
+            inst_idx += 1
+
+        mu.hook_add(uc.UC_HOOK_MEM_READ_UNMAPPED | uc.UC_HOOK_MEM_WRITE_UNMAPPED, _hook_invalid_mem_access)
+        mu.hook_add(uc.UC_HOOK_CODE, _hook_code64)
+
+        image_base = self.binary.optional_header.imagebase
+        vmp_sec_va = image_base + vmp_sec.virtual_address
+
+        mu.mem_map(vmp_sec_va, (vmp_sec.virtual_size // 0x100000 + 1) * 0x100000)
+        mu.mem_write(vmp_sec_va, vmp_sec.content.tobytes())
+
+        entry_va = image_base + vm_bb.entry_rva
+
+        print(hex(entry_va))
+
+        # mu.mem_map(code_base, code_size)
+        mu.mem_write(entry_va, code_bytes)
+
+        mu.emu_start(entry_va, entry_va + len(code_bytes))
+
+        # VSP_REG: X86Reg.RSI
+        # VSP_REG: X86Reg.RBX
+        rsp = mu.mem_read(mu.reg_read(uc_x86.UC_X86_REG_RSI) - 8, 8)
+        import struct
+        print(hex(struct.unpack("<Q", rsp)[0]))
+
+        return struct.unpack("<Q", rsp)[0] - image_base
+        # print(code_bytes)
+
     def _unroll(self, state: VMState, handler_rva: int):
+        vm_bb = VMBasicBlock()
         while True:
             print(f"Unroll 0x{handler_rva:x} VIP: 0x{state.vip_rva:x} VRK: 0x{state.rolling_key:x}")
             ic = self._deobfuscate(handler_rva, debug=False)
-            handler = VMHandlerParser.parse(state, ic)
-            # for param in handler.parameters:
-            #     print(param)
-            if handler.next_rva != VMHandler.INVALID_RVA:
-                handler_rva = handler.next_rva
-                # break
-            else:
-                break
+            handler = VMHandlerParser.try_parse(state, handler_rva, ic)
+            vm_bb.add_handler(handler)
+
+            handler_rva = handler.next_rva
+
+    # def _unroll(self, state: VMState, handler_rva: int):
+    #     initial_state = state.duplicate()
+    #     vm_bb = VMBasicBlock()
+    #     while True:
+    #         print(f"Unroll 0x{handler_rva:x} VIP: 0x{state.vip_rva:x} VRK: 0x{state.rolling_key:x}")
+    #         ic = self._deobfuscate(handler_rva, debug=False)
+    #         handler = VMHandlerParser.parse(state, ic)
+    #         vm_bb.add_handler(handler)
+    #
+    #         if handler.virtualized_instruction.op == "VJMP":
+    #
+    #             print("Found VJMP")
+    #             next_vip = self._trace_block(initial_state, vm_bb)
+    #             new_state = state.duplicate()
+    #
+    #             for p in handler.parameters:
+    #                 print(p)
+    #             new_state._vip_rva = next_vip
+    #             new_state.update_rolling_key(self.binary.optional_header.imagebase + next_vip)
+    #             jmp_off = new_state.read_vip(4)
+    #
+    #             db = handler.parameters[0]
+    #             db._encrypted = jmp_off
+    #             db._key = new_state.rolling_key
+    #             db.decrypt(new_state)
+    #
+    #             handler_rva = Mod2NInt.normalize(state.reloc_rva + handler.next_rva, 32)
+    #             print(hex(db.decrypted + state.reloc_rva))
+    #             print(hex(db.decrypted))
+    #             print(hex(state.rolling_key))
+    #             break
+    #         elif handler.next_rva != INVALID_RVA:
+    #             handler_rva = handler.next_rva
+    #             break
+    #         else:
+    #             break
 
     def _parse_vm_entry(self, vm_entry_rva):
         print(f"Processing VMEntry at 0x{vm_entry_rva:x}")

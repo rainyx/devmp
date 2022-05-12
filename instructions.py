@@ -35,7 +35,7 @@ class VMOpcodeDescriptor:
             abbrv_param_size = {8: 'Q', 4: 'D', 2: 'W', 1: 'B'}
 
             for v in possible_variants:
-                concrete_identifier = identifier.replace('*', abbrv_param_size[v])
+                concrete_identifier = identifier[0:-1] + abbrv_param_size[v]
                 if self.reduce(state, v_inst, concrete_identifier, variants + [v]):
                     return True
 
@@ -164,6 +164,7 @@ class VPOPVDescriptor(VMOpcodeDescriptor):
 
     VPOPV*(u1 pos)
     """
+
     @property
     def parameter_sizes(self) -> []:
         return [1]
@@ -201,6 +202,7 @@ class VPOPDDescriptor(VMOpcodeDescriptor):
 
     VPOPD*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return [VMInstruction.PANY]
@@ -222,6 +224,7 @@ class VPUSHCDescriptor(VMOpcodeDescriptor):
 
     VPUSHC*(u* const)
     """
+
     @property
     def parameter_sizes(self) -> []:
         return [VMInstruction.PANY]
@@ -248,6 +251,7 @@ class VPUSHVDescriptor(VMOpcodeDescriptor):
 
     VPUSHV*(u8 pos)
     """
+
     @property
     def parameter_sizes(self) -> []:
         return [1]
@@ -275,6 +279,7 @@ class VPUSHRDescriptor(VMOpcodeDescriptor):
 
     VPUSHR()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -304,6 +309,7 @@ class VADDUDescriptor(VMOpcodeDescriptor):
 
     VADDU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -339,6 +345,7 @@ class VIMULUDescriptor(VMOpcodeDescriptor):
 
     VIMULU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -378,6 +385,7 @@ class VIDIVUDescriptor(VMOpcodeDescriptor):
 
     VIDIVU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -418,6 +426,7 @@ class VMULUDescriptor(VMOpcodeDescriptor):
 
     VMULU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -457,6 +466,7 @@ class VDIVUDescriptor(VMOpcodeDescriptor):
 
     VDIVU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -498,6 +508,7 @@ class VNORUDescriptor(VMOpcodeDescriptor):
 
     VNORU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -513,7 +524,7 @@ class VNORUDescriptor(VMOpcodeDescriptor):
                (dt == 0 or self.i_shift_vsp(state, ic[2], sz - 8)) and \
                ic[2 + dt].id == cs_x86.X86_INS_NOT and \
                ic[3 + dt].id == cs_x86.X86_INS_NOT and \
-               ic[4 + dt].id == cs_x86.X86_INS_OR and \
+               ic[4 + dt].id == cs_x86.X86_INS_AND and \
                self.i_write_vsp(state, ic[5 + dt], +8, var[0]) and \
                self.i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
 
@@ -536,6 +547,7 @@ class VNANDUDescriptor(VMOpcodeDescriptor):
 
     VNORU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -551,7 +563,7 @@ class VNANDUDescriptor(VMOpcodeDescriptor):
                (dt == 0 or self.i_shift_vsp(state, ic[2], sz - 8)) and \
                ic[2 + dt].id == cs_x86.X86_INS_NOT and \
                ic[3 + dt].id == cs_x86.X86_INS_NOT and \
-               ic[4 + dt].id == cs_x86.X86_INS_AND and \
+               ic[4 + dt].id == cs_x86.X86_INS_OR and \
                self.i_write_vsp(state, ic[5 + dt], +8, var[0]) and \
                self.i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
 
@@ -572,6 +584,7 @@ class VSHRUDescriptor(VMOpcodeDescriptor):
 
     VSHRU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -605,6 +618,7 @@ class VSHLUDescriptor(VMOpcodeDescriptor):
 
     VSHLU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -639,6 +653,7 @@ class VSHRDUDescriptor(VMOpcodeDescriptor):
 
     VSHRDU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -674,6 +689,7 @@ class VSHLDUDescriptor(VMOpcodeDescriptor):
 
     VSHLDU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -704,6 +720,7 @@ class VREADUDescriptor(VMOpcodeDescriptor):
 
     VREADU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -737,6 +754,7 @@ class VWRITEUDescriptor(VMOpcodeDescriptor):
 
     VWRITEU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -770,6 +788,7 @@ class VLOCKXCHGUDescriptor(VMOpcodeDescriptor):
 
     VLOCKXCHGU*()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -803,6 +822,7 @@ class VCUPIDDescriptor(VMOpcodeDescriptor):
 
     VCPUID()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -837,6 +857,7 @@ class VCUPIDXDescriptor(VMOpcodeDescriptor):
 
     VCPUIDX()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -865,6 +886,7 @@ class VRDTSCDescriptor(VMOpcodeDescriptor):
 
     VRDTSC()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -890,6 +912,7 @@ class VSETVSPDescriptor(VMOpcodeDescriptor):
 
     VSETVSP()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -914,6 +937,7 @@ class VJMPDescriptor(VMOpcodeDescriptor):
 
     VJMP()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -951,6 +975,7 @@ class VNOPDescriptor(VMOpcodeDescriptor):
 
     VNOP
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -974,6 +999,7 @@ class VPUSHCR0Descriptor(VMOpcodeDescriptor):
 
     VPUSH<special>()
     """
+
     @property
     def parameter_sizes(self) -> []:
         return []
@@ -1001,8 +1027,7 @@ class VPUSHCR3Descriptor(VMOpcodeDescriptor):
                self.i_write_vsp(state, ic[2], 0, 8)
 
 
-class VMArchitecture:
-
+class VMInstructions:
     _opcodes = {
         # 'VUNK': VUNKDescriptor(),
         # 'VEMIT': VEMITDescriptor(),
@@ -1035,10 +1060,6 @@ class VMArchitecture:
         'VPUSHCR0': VPUSHCR0Descriptor(),
         'VPUSHCR3': VPUSHCR3Descriptor()
     }
-
-    @classmethod
-    def reduce_chunk(cls, inst):
-        pass
 
     @classmethod
     def classify(cls, state: VMState, ic: InstructionCollection):

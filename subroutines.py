@@ -2,11 +2,11 @@ import capstone as cs
 import capstone.x86 as cs_x86
 from lief.PE import Binary
 
-from architecture import VMArchitecture
+from instructions import VMInstructions
 from utils import InstructionCollection, xor_sized, imatch, Mod2NInt, emulate_shared
 from universal import X86Reg
-from entities import VMState, VMHandler, VMEncryptedValue
-from optimizers import VMOptimizer
+from entities import VMState, VMHandler, VIPDirection, VMDecryptionBlock, VMDecryptedInfo
+from optimizers import VMInstructionsOptimizer
 
 
 def update_vip_direction(state: VMState, cursor: int, ic: InstructionCollection):
@@ -43,19 +43,66 @@ def update_vip_direction(state: VMState, cursor: int, ic: InstructionCollection)
     forward_idx = ic.next_index_by(cursor, _forward_finder)
     backward_idx = ic.next_index_by(cursor, _backward_finder)
 
-    vip_dir = VMState.VIPDirection.UNSPECIFIED
+    vip_dir = VIPDirection.UNSPECIFIED
     if forward_idx != -1:
-        vip_dir = VMState.VIPDirection.FORWARD
+        vip_dir = VIPDirection.FORWARD
     elif backward_idx != -1:
-        vip_dir = VMState.VIPDirection.BACKWARD
+        vip_dir = VIPDirection.BACKWARD
     else:
         raise Exception("vip direction not determined")
 
     state.update_vip_direction(vip_dir)
 
 
-def decrypt_value(state: VMState, def_reg: X86Reg, encrypted_value: int, value_size: int, cursor: int,
-                  ic: InstructionCollection):
+def _decrypt(state: VMState, decryption_block: VMDecryptionBlock) -> VMDecryptedInfo:
+    encrypted = state.read_vip(decryption_block.value_size)
+    code_bytes = decryption_block.transforms.get_all_bytes()
+
+    encrypted = xor_sized(encrypted, state.rolling_key, decryption_block.value_size)
+    # print(f"  {encrypted_val:x}, {state.rolling_key:x}")
+
+    out_reg_values = emulate_shared(code_bytes, {
+        state.vrk_reg: state.rolling_key, decryption_block.def_reg: encrypted
+    }, [decryption_block.def_reg, state.vrk_reg])
+
+    decrypted = out_reg_values[decryption_block.def_reg]
+    # print(f"decrypted_val:  {decrypted_val:x}")
+    # update rolling key
+    next_key = xor_sized(state.rolling_key, decrypted, decryption_block.value_size)
+    state.update_rolling_key(next_key)
+
+    d_info = VMDecryptedInfo(i_begin_index=decryption_block.i_begin_index, i_end_index=decryption_block.i_end_index,
+                             def_reg=decryption_block.def_reg, value_size=decryption_block.value_size, value=decrypted)
+
+    return d_info
+
+
+def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollection):
+    if state.vip_direction == 0:
+        raise Exception("vip direction is not determined")
+
+    def _def_finder(i):
+        if imatch(i, cs.x86.X86_INS_MOVZX, cs.x86.X86_OP_REG, cs.CS_OP_MEM):
+            # ----------------------------------------------------
+            # movzx reg, [vip_reg]
+            # ----------------------------------------------------
+            return state.vip_reg.is_equal_to_capstone(i.operands[1].mem.base)
+        elif imatch(i, cs.x86.X86_INS_MOV, cs.x86.X86_OP_REG, cs.CS_OP_MEM):
+            # ----------------------------------------------------
+            # mov reg, [vip_reg]
+            # ----------------------------------------------------
+            return state.vip_reg.is_equal_to_capstone(i.operands[1].mem.base)
+        else:
+            return False
+
+    idx, def_reg_i = ic.next_by(cursor, _def_finder)
+
+    if idx == -1:
+        return None
+
+    def_reg = X86Reg.from_capstone(def_reg_i.operands[0].reg)
+    value_size = def_reg_i.operands[1].size
+
     def _decryption_begin_finder(i):
         # ----------------------------------------------------
         # xor vkr_reg, def_reg
@@ -85,24 +132,6 @@ def decrypt_value(state: VMState, def_reg: X86Reg, encrypted_value: int, value_s
                    i.operands[0].mem.scale == 1
         return False
 
-    def _decryption_end_finder(i):
-        if imatch(i, cs.x86.X86_INS_XOR, cs.x86.X86_OP_REG, cs.x86.X86_OP_REG):
-            # ----------------------------------------------------
-            # xor def_reg, vrk_reg
-            # ----------------------------------------------------
-            return state.vrk_reg.is_equal_to_capstone(i.operands[0].reg)
-        elif imatch(i, cs.x86.X86_INS_XOR, cs.CS_OP_MEM, cs.x86.X86_OP_REG):
-            # ----------------------------------------------------
-            # push vrk_reg
-            # xor [rsp], def_reg
-            # pop vrk_reg
-            # ----------------------------------------------------
-            return def_reg.is_equal_to_capstone(i.operands[1].reg) and \
-                   i.operands[0].mem.base == cs_x86.X86_REG_RSP and \
-                   i.operands[0].mem.disp == 0 and \
-                   i.operands[0].mem.scale == 1
-        return False
-
     begin_idx, begin_i = ic.next_by(cursor, _decryption_begin_finder)
     assert begin_idx != -1 and "decryption begin idx not found"
 
@@ -111,6 +140,7 @@ def decrypt_value(state: VMState, def_reg: X86Reg, encrypted_value: int, value_s
     def_reg = X86Reg.from_capstone(begin_i.operands[0].reg)
 
     end_idx = ic.next_index_by(begin_idx + 1, _decryption_end_finder_1)
+
     # assert end_idx != -1 and "decryption end idx not found"
 
     def _push_finder(i):
@@ -129,60 +159,28 @@ def decrypt_value(state: VMState, def_reg: X86Reg, encrypted_value: int, value_s
     else:
         end_idx = ic.next_index_by(begin_idx + 1, _decryption_end_finder_2)
 
-    # begin_idx, begin_i = ic.next_by(cursor, _decryption_begin_finder)
-    # assert begin_idx != -1 and "decryption begin idx not found"
-    #
-    # assert def_reg.is_equal_to_capstone(begin_i.operands[0].reg) and "def_reg is not equal to begin_i.operands[0].reg"
-    # # cast type
-    # def_reg = X86Reg.from_capstone(begin_i.operands[0].reg)
-    #
-    # end_idx = ic.next_index_by(begin_idx + 1, _decryption_end_finder)
-    # assert end_idx != -1 and "decryption end idx not found"
-
-    sub_ic, _ = ic.trace(def_reg.extended, begin_idx + 1, end_idx - 1)
+    trans_ic, _ = ic.trace(def_reg.extended, begin_idx + 1, end_idx - 1)
 
     if imatch(ic[end_idx], cs.x86.X86_INS_XOR, cs.CS_OP_MEM, cs.x86.X86_OP_REG):
         def _pop_finder2(i):
             return imatch(i, cs.x86.X86_INS_POP, cs.x86.X86_OP_REG) and \
-                     state.vrk_reg.is_equal_to_capstone(i.operands[0].reg)
+                   state.vrk_reg.is_equal_to_capstone(i.operands[0].reg)
+
         end_idx = ic.next_index_by(end_idx, _pop_finder2)
 
-    entity = VMEncryptedValue(blk_start=begin_idx, blk_end=end_idx, def_reg=def_reg,
-                              encrypted_value=encrypted_value, value_size=value_size,
-                              transforms=sub_ic)
-    entity.decrypt(state=state)
-    return entity
+    block = VMDecryptionBlock(i_begin_index=begin_idx, i_end_index=end_idx, def_reg=def_reg, value_size=value_size,
+                              transforms=trans_ic)
+
+    return block
 
 
-def next_parameter(state: VMState, cursor: int, ic: InstructionCollection):
-    if state.vip_direction == 0:
-        raise Exception("vip direction is not determined")
+def _next_decrypted(state: VMState, cursor: int, ic: InstructionCollection):
+    d_blk = _next_decryption_block(state, cursor, ic)
+    if d_blk is None:
+        return -1, None
 
-    def _def_finder(i):
-        if imatch(i, cs.x86.X86_INS_MOVZX, cs.x86.X86_OP_REG, cs.CS_OP_MEM):
-            # ----------------------------------------------------
-            # movzx reg, [vip_reg]
-            # ----------------------------------------------------
-            return state.vip_reg.is_equal_to_capstone(i.operands[1].mem.base)
-        elif imatch(i, cs.x86.X86_INS_MOV, cs.x86.X86_OP_REG, cs.CS_OP_MEM):
-            # ----------------------------------------------------
-            # mov reg, [vip_reg]
-            # ----------------------------------------------------
-            return state.vip_reg.is_equal_to_capstone(i.operands[1].mem.base)
-        else:
-            return False
-
-    idx, def_reg_i = ic.next_by(cursor, _def_finder)
-
-    if idx == -1:
-        return None
-
-    def_reg = X86Reg.from_capstone(def_reg_i.operands[0].reg)
-    value_size = def_reg_i.operands[1].size
-    encrypted_value = state.read_vip(value_size)
-    entity = decrypt_value(state=state, def_reg=def_reg, encrypted_value=encrypted_value, value_size=value_size,
-                           cursor=idx + 1, ic=ic)
-    return entity
+    info = _decrypt(state, d_blk)
+    return info
 
 
 class VMEntryParser:
@@ -284,14 +282,24 @@ class VMEntryParser:
                         vip_rva=vip_rva, rolling_key=rolling_key, reloc_rva=reloc_rva)
         update_vip_direction(state, vsp_i_idx + 1, ic)
 
-        first_handler_off = next_parameter(state, vrk_i_idx + 1, ic)
-        first_handler_rva = Mod2NInt.normalize(reloc_rva + first_handler_off.decrypted_value, 32)
+        # first_handler_off = next_parameter(state, vrk_i_idx + 1, ic)
+        d_info = _next_decrypted(state, vrk_i_idx + 1, ic)
+
+        first_handler_rva = Mod2NInt.normalize(reloc_rva + d_info.value, 32)
+        print("first_handler_rva:", hex(first_handler_rva))
         return state, first_handler_rva
 
 
 class VMSwapParser:
+
+    class Result:
+        def __init__(self, reloc_rva: int, i_end_index: int, prefix_ic: InstructionCollection):
+            self.reloc_rva = reloc_rva
+            self.i_end_index = i_end_index
+            self.prefix_ic = prefix_ic
+
     @classmethod
-    def _find_self_ref(cls, state: VMState, cursor: int, ic: InstructionCollection):
+    def _find_self_ref(cls, state: VMState, ic: InstructionCollection):
         def _finder(i):
             # ----------------------------------------------------
             # lea r64, [$]
@@ -301,14 +309,18 @@ class VMSwapParser:
                    i.operands[1].mem.scale == 1 and \
                    i.operands[1].mem.base == cs_x86.X86_REG_RIP
 
-        idx, def_i = ic.next_by(cursor, _finder)
+        idx, def_i = ic.next_by(0, _finder)
         if idx == -1:
-            return -1, None
+            return None
         else:
-            return idx, X86Reg.from_capstone(def_i.operands[0].reg).extended
+            return def_i.address
 
     @classmethod
-    def parse(cls, state: VMState, ic: InstructionCollection):
+    def try_parse(cls, state: VMState, ic: InstructionCollection):
+        reloc_rva = cls._find_self_ref(state, ic)
+        if reloc_rva is None:
+            return None
+
         # ----------------------------------------------------
         # mov r64, [vsp]
         # ----------------------------------------------------
@@ -383,54 +395,63 @@ class VMSwapParser:
                 pfx_end = pfx_end - vip_inh[1][0]
 
             pfx_ic = ic.range_of(0, pfx_end)
-            pfx_ic = VMOptimizer.process(state, [], pfx_ic)
+            pfx_ic = VMInstructionsOptimizer.process(state, [], pfx_ic)
 
             print(f"Before swap: VSP_REG: {state.vsp_reg} VIP_REG: {state.vip_reg} VRK_REG: {state.vrk_reg}")
             state.swap(new_vsp_reg=new_vsp_reg, new_vip_reg=new_vip_reg, new_vrk_reg=new_vrk_reg)
             print(f"After swap: VSP_REG: {state.vsp_reg} VIP_REG: {state.vip_reg} VRK_REG: {state.vrk_reg}")
             update_vip_direction(state, idx_mutation_end + 1, ic)
 
-            return idx_mutation_end, pfx_ic
+            return cls.Result(reloc_rva=reloc_rva, i_end_index=idx_mutation_end, prefix_ic=pfx_ic)
         else:
-            return -1, None
-
-    @classmethod
-    def try_parse(cls, state: VMState, ic: InstructionCollection):
-        idx, reloc_reg = cls._find_self_ref(state, 0, ic)
-
-        if idx != -1:
-            return cls.parse(state, ic)
-        return -1, None
+            return None
 
 
 class VMHandlerParser:
 
     @classmethod
-    def _all_parameters(cls, state: VMState, ic: InstructionCollection):
+    def _all_decryption_blocks(cls, state: VMState, ic: InstructionCollection):
+        d_blks = []
         cursor = 0
         while True:
-            entity = next_parameter(state=state, cursor=cursor, ic=ic)
-            if entity:
-                yield entity
-                cursor = entity.blk_end
+            d_blk = _next_decryption_block(state=state, cursor=cursor, ic=ic)
+            if d_blk:
+                d_blks.append(d_blk)
+                cursor = d_blk.i_end_index + 1
             else:
                 break
+        return d_blks
 
     @classmethod
-    def parse(cls, state: VMState, ic: InstructionCollection):
-        swap_end_idx, prefix_ic = VMSwapParser.try_parse(state, ic)
-        if swap_end_idx != -1:
-            ic = ic.tail_from(swap_end_idx + 1)
+    def try_parse(cls, state: VMState, handler_rva: int, ic: InstructionCollection):
 
-        values = list(cls._all_parameters(state, ic))
-        o_ic = VMOptimizer.process(state, values, ic)
-        if prefix_ic:
-            o_ic = prefix_ic + o_ic
+        swap = VMSwapParser.try_parse(state, ic)
+        if swap:
+            ic = ic.tail(swap.i_end_index + 1)
 
-        if len(values) == 0:
-            raise Exception("no values found")
-        else:
-            handler = VMHandler(rva=ic[0].address, parameters=values, ic=o_ic)
-            VMArchitecture.classify(state, o_ic)
+        d_blks = cls._all_decryption_blocks(state, ic)
+        last_d_bkl = d_blks[-1]
 
-            return handler
+        d_operand_infos = []
+        operands = []
+
+        # decrypt all operands
+        for op_idx in range(len(d_blks) - 1):
+            d_info = _decrypt(state, d_blks[op_idx])
+            d_operand_infos.append(d_info)
+            operands.append(d_info.value)
+            # print(f"{op_idx}, 0x{d_info.value:x}")
+
+        # Discard calc_jmp_off routine
+        ic = ic.head(last_d_bkl.i_begin_index)
+        ic = VMInstructionsOptimizer.process(state, d_operand_infos, ic)
+        if swap:
+            ic = swap.prefix_ic + ic
+        v_inst = VMInstructions.classify(state, ic)
+
+        d_info = _decrypt(state, last_d_bkl)
+        jmp_off = d_info.value
+        next_rva = Mod2NInt.normalize(handler_rva + jmp_off, 32)
+
+        handler = VMHandler(rva=ic[0].address, next_rva=next_rva, v_inst=v_inst, operands=operands, ic=ic)
+        return handler
