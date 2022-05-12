@@ -1,12 +1,117 @@
 import capstone as cs
 import capstone.x86 as cs_x86
+import unicorn as uc
+import unicorn.x86_const as uc_x86
 from lief.PE import Binary
 
 from instructions import VMInstructions
-from utils import InstructionCollection, xor_sized, imatch, Mod2NInt, emulate_shared
+from utils import InstructionCollection, xor_sized, imatch, Mod2NInt, emulate_shared, get_shared_ks
 from universal import X86Reg
-from entities import VMState, VMHandler, VIPDirection, VMDecryptionBlock, VMDecryptedInfo
+from entities import VMState, VMHandler, VIPDirection, VMDecryptionBlock, VMDecryptedInfo, VMBasicBlock
 from optimizers import VMInstructionsOptimizer
+
+import struct as st
+
+
+class VMTracer:
+
+    def _hook_invalid_mem(self, mu, access, address, size, value, user_data):
+        print(f"Invalid memory access: {access} address: 0x{address:08x} sz: {size} val: 0x{value:x}")
+
+    def _hook_code(self, _uc, address, size, user_data):
+        if self._current_inst_idx < 3:
+            self._current_inst_idx += 1
+            return
+        inst = self._current_insts[self._current_inst_idx - 3]
+        print(f" [{self._current_inst_idx}] [{_uc.reg_read(uc_x86.UC_X86_REG_RIP):x}] {inst}")
+        for reg in [X86Reg.RSP, self._current_state.vsp_reg]:
+            print(f"    {reg}: 0x{_uc.reg_read(reg.unicorn):x}")
+        reg_uses, reg_defs = inst.regs_access()
+        if reg_uses:
+            print("    ==== reg uses:")
+            for reg in reg_uses:
+                u_reg = X86Reg.from_capstone(reg)
+                print(f"    {u_reg}: 0x{_uc.reg_read(u_reg.unicorn):x}")
+
+        if reg_defs:
+            print("    ==== reg defs:")
+            for reg in reg_defs:
+                u_reg = X86Reg.from_capstone(reg)
+                print(f"    {u_reg}")
+
+        self._current_inst_idx += 1
+
+    def __init__(self, binary: Binary):
+        stack_base = 0xF000000000000000
+        stack_size = 2 * 1024 * 1024
+        rsp = stack_base + int(stack_size / 2)
+
+        mu = uc.Uc(uc.UC_ARCH_X86, uc.UC_MODE_64)
+
+        # mu.hook_add(uc.UC_HOOK_MEM_READ_UNMAPPED | uc.UC_HOOK_MEM_WRITE_UNMAPPED, self._hook_invalid_mem)
+        # mu.hook_add(uc.UC_HOOK_CODE, self._hook_code)
+
+        # Setup stack
+        mu.mem_map(stack_base, stack_size)
+        mu.reg_write(uc_x86.UC_X86_REG_RSP, rsp)
+
+        # Setup vmp section
+        vmp_sec = None
+        for sec in binary.sections:
+            if sec.name == ".vmp0":
+                vmp_sec = sec
+                break
+        vmp_sec_va = binary.optional_header.imagebase + vmp_sec.virtual_address
+        mu.mem_map(vmp_sec_va, (vmp_sec.virtual_size // 0x100000 + 1) * 0x100000)
+        mu.mem_write(vmp_sec_va, vmp_sec.content.tobytes())
+
+        self._binary = binary
+        self._mu = mu
+
+        self._current_state = None
+        self._current_insts = []
+        self._current_inst_idx = 0
+
+    @property
+    def emulator(self) -> uc.Uc:
+        return self._mu
+
+    @property
+    def binary(self) -> Binary:
+        return self._binary
+
+    def trace(self, initial_state: VMState, vm_bb: VMBasicBlock):
+        self._current_state = initial_state
+        image_base = self.binary.optional_header.imagebase
+
+        ks = get_shared_ks()
+        # create trace code
+        init_code = f"mov {initial_state.vsp_reg.name}, RSP\n" \
+                    f"mov {initial_state.vip_reg.name}, 0x{initial_state.vip_rva + image_base:x}\n" \
+                    f"mov {initial_state.vrk_reg.name}, 0x{initial_state.rolling_key:x}".encode('utf-8')
+
+        code_bytes = bytes(ks.asm(init_code)[0])
+        code_bytes = code_bytes + vm_bb.code_bytes
+
+        insts = vm_bb.underlying_instructions
+        self._current_insts = insts
+        self._current_inst_idx = 0
+
+        entry_va = image_base + vm_bb.entry_rva
+
+        print("EntryVA", hex(entry_va))
+        # write trace code and execute
+        mu = self.emulator
+        mu.mem_write(entry_va, code_bytes)
+        mu.emu_start(entry_va, entry_va + len(code_bytes))
+
+        # retrieve trace results
+        # VSP_REG: X86Reg.RSI
+        # VSP_REG: X86Reg.RBX
+        rsp = mu.mem_read(mu.reg_read(initial_state.vsp_reg.unicorn), 8)
+        print("NEW", hex(st.unpack("<Q", rsp)[0]))
+
+        return st.unpack("<Q", rsp)[0] - image_base
 
 
 def update_vip_direction(state: VMState, cursor: int, ic: InstructionCollection):
@@ -286,7 +391,6 @@ class VMEntryParser:
         d_info = _next_decrypted(state, vrk_i_idx + 1, ic)
 
         first_handler_rva = Mod2NInt.normalize(reloc_rva + d_info.value, 32)
-        print("first_handler_rva:", hex(first_handler_rva))
         return state, first_handler_rva
 
 
@@ -423,7 +527,8 @@ class VMHandlerParser:
         return d_blks
 
     @classmethod
-    def try_parse(cls, state: VMState, handler_rva: int, ic: InstructionCollection):
+    def try_parse(cls, state: VMState, handler_rva: int, initial_state: VMState,
+                  vm_basic_block: VMBasicBlock, ic: InstructionCollection):
 
         swap = VMSwapParser.try_parse(state, ic)
         if swap:
@@ -449,9 +554,20 @@ class VMHandlerParser:
             ic = swap.prefix_ic + ic
         v_inst = VMInstructions.classify(state, ic)
 
+        if v_inst.op == 'VJMP':
+            print('VJMP hit')
+            tracer = VMTracer(state.binary)
+            next_vip = tracer.trace(initial_state, vm_basic_block)
+            next_rolling_key = state.binary.imagebase + next_vip
+            state._vip_rva = next_vip
+            state._rolling_key = next_rolling_key
+            jmp_base = swap.reloc_rva
+        else:
+            jmp_base = handler_rva
+
         d_info = _decrypt(state, last_d_bkl)
         jmp_off = d_info.value
-        next_rva = Mod2NInt.normalize(handler_rva + jmp_off, 32)
+        next_rva = Mod2NInt.normalize(jmp_base + jmp_off, 32)
 
         handler = VMHandler(rva=ic[0].address, next_rva=next_rva, v_inst=v_inst, operands=operands, ic=ic)
         return handler

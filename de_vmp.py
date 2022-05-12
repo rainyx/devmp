@@ -91,90 +91,13 @@ class VMP:
 
         return InstructionCollection(insts)
 
-    def _trace_block(self, initial_state: VMState, vm_bb: VMBasicBlock):
-        from utils import get_shared_ks
-        image_base = self.binary.optional_header.imagebase
-        ks = get_shared_ks()
-        init_code = f"mov {initial_state.vsp_reg.name}, RSP\n" \
-                    f"mov {initial_state.vip_reg.name}, 0x{initial_state.vip_rva + image_base:x}\n" \
-                    f"mov {initial_state.vrk_reg.name}, 0x{initial_state.rolling_key:x}".encode('utf-8')
-
-        code_bytes = bytes(ks.asm(init_code)[0])
-        code_bytes = code_bytes + vm_bb.code_bytes
-
-        vmp_sec = self.binary.section_from_rva(initial_state.vip_rva)
-
-        stack_base = 0x0000000000000000
-        stack_size = 2 * 1024 * 1024
-        rsp = stack_base + int(stack_size / 2)
-
-        mu = uc.Uc(uc.UC_ARCH_X86, uc.UC_MODE_64)
-        mu.mem_map(stack_base, stack_size)
-        mu.reg_write(uc_x86.UC_X86_REG_RSP, rsp)
-
-        insts = vm_bb.underlying_instructions
-        inst_idx = 0
-
-        def _hook_invalid_mem_access(mu, access, address, size, value, user_data):
-            print(f"Invalid memory access: {access} address: 0x{address:08x} sz: {size} val: 0x{value:x}")
-
-        def _hook_code64(_uc, address, size, user_data):
-            nonlocal inst_idx
-            if inst_idx < 3:
-                inst_idx += 1
-                return
-            inst = insts[inst_idx-3]
-            print(f" [{inst_idx}] [{_uc.reg_read(uc_x86.UC_X86_REG_RIP):x}] {inst}")
-            for reg in [X86Reg.RSP, initial_state.vsp_reg]:
-                print(f"    {reg}: 0x{_uc.reg_read(reg.unicorn):x}")
-            reg_uses, reg_defs = inst.regs_access()
-            if reg_uses:
-                print("    ==== reg uses:")
-                for reg in reg_uses:
-                    u_reg = X86Reg.from_capstone(reg)
-                    print(f"    {u_reg}: 0x{_uc.reg_read(u_reg.unicorn):x}")
-
-            if reg_defs:
-                print("    ==== reg defs:")
-                for reg in reg_defs:
-                    u_reg = X86Reg.from_capstone(reg)
-                    print(f"    {u_reg}")
-
-            inst_idx += 1
-
-        mu.hook_add(uc.UC_HOOK_MEM_READ_UNMAPPED | uc.UC_HOOK_MEM_WRITE_UNMAPPED, _hook_invalid_mem_access)
-        mu.hook_add(uc.UC_HOOK_CODE, _hook_code64)
-
-        image_base = self.binary.optional_header.imagebase
-        vmp_sec_va = image_base + vmp_sec.virtual_address
-
-        mu.mem_map(vmp_sec_va, (vmp_sec.virtual_size // 0x100000 + 1) * 0x100000)
-        mu.mem_write(vmp_sec_va, vmp_sec.content.tobytes())
-
-        entry_va = image_base + vm_bb.entry_rva
-
-        print(hex(entry_va))
-
-        # mu.mem_map(code_base, code_size)
-        mu.mem_write(entry_va, code_bytes)
-
-        mu.emu_start(entry_va, entry_va + len(code_bytes))
-
-        # VSP_REG: X86Reg.RSI
-        # VSP_REG: X86Reg.RBX
-        rsp = mu.mem_read(mu.reg_read(uc_x86.UC_X86_REG_RSI) - 8, 8)
-        import struct
-        print(hex(struct.unpack("<Q", rsp)[0]))
-
-        return struct.unpack("<Q", rsp)[0] - image_base
-        # print(code_bytes)
-
     def _unroll(self, state: VMState, handler_rva: int):
+        initial_state = state.duplicate()
         vm_bb = VMBasicBlock()
         while True:
             print(f"Unroll 0x{handler_rva:x} VIP: 0x{state.vip_rva:x} VRK: 0x{state.rolling_key:x}")
             ic = self._deobfuscate(handler_rva, debug=False)
-            handler = VMHandlerParser.try_parse(state, handler_rva, ic)
+            handler = VMHandlerParser.try_parse(state, handler_rva, initial_state, vm_bb, ic)
             vm_bb.add_handler(handler)
 
             handler_rva = handler.next_rva
@@ -221,9 +144,9 @@ class VMP:
         ic = self._deobfuscate(vm_entry_rva)
 
         state, first_handler_rva = VMEntryParser.parse(self.binary, ic)
-        first_handler_rva = 0xafaba
-        state._vip_rva = 0x5972
-        state._rolling_key = 0xfffffffffffe3ae2
+        # first_handler_rva = 0xafaba
+        # state._vip_rva = 0x5972
+        # state._rolling_key = 0xfffffffffffe3ae2
         self._unroll(state, first_handler_rva)
 
     def process(self):
