@@ -3,43 +3,256 @@ import capstone.x86 as cs_x86
 import unicorn as uc
 import unicorn.x86_const as uc_x86
 from lief.PE import Binary
+import z3
 
 from instructions import VMInstructions
-from utils import InstructionCollection, xor_sized, imatch, Mod2NInt, emulate_shared, get_shared_ks
+from utils import InstructionCollection, LinkedList, xor_sized, imatch, unpack_int,\
+    Mod2NInt, emulate_shared, get_shared_ks, get_shared_md
 from universal import X86Reg
-from entities import VMState, VMHandler, VIPDirection, VMDecryptionBlock, VMDecryptedInfo, VMBasicBlock
+from entities import VMState, VMHandler, VIPDirection, VMDecryptionBlock, VMDecryptedInfo, VMBasicBlock, INVALID_RVA
 from optimizers import VMInstructionsOptimizer
+from execution import VMSymbolicExecutor, VMBranchAnalyzer
+
 
 import struct as st
 
 
 class VMTracer:
 
+    def _get_inst(self, inst_str: str, address: int = 0) -> cs.CsInsn:
+        ks = get_shared_ks()
+        md = get_shared_md()
+        code_bytes = bytes(ks.asm(inst_str.encode('utf-8'))[0])
+        inst = next(md.disasm(code_bytes, address))
+        return inst
+
     def _hook_invalid_mem(self, mu, access, address, size, value, user_data):
         print(f"Invalid memory access: {access} address: 0x{address:08x} sz: {size} val: 0x{value:x}")
 
-    def _hook_code(self, _uc, address, size, user_data):
-        if self._current_inst_idx < 3:
+    def _hook_mem(self, mu, access, address, size, value, user_data):
+        # print(hex(mu.reg_read(self._current_state.vsp_reg.unicorn)))
+        # if mu.reg_read(self._current_state.vsp_reg.unicorn) == 0xf000000000100090:
+        if access == 16:
+            value = st.unpack("<Q", mu.mem_read(address, 8))[0]
+            print(f"Memory access: {access} address: 0x{address:08x} sz: {size} val: 0x{value:x}")
+        else:
+            before_value = st.unpack("<Q", mu.mem_read(address, 8))[0]
+            print(f"Memory access: {access} address: 0x{address:08x} sz: {size} "
+                  f"before_value: 0x{before_value:x} val: 0x{value:x}")
+
+    def _format_eflags(self, eflags):
+        flags = []
+        if eflags & 0x1:
+            flags.append("CF")
+        if eflags & 0x4:
+            flags.append("PF")
+        if eflags & 0x10:
+            flags.append("AF")
+        if eflags & 0x40:
+            flags.append("ZF")
+        if eflags & 0x80:
+            flags.append("SF")
+        if eflags & 0x100:
+            flags.append("TF")
+        if eflags & 0x200:
+            flags.append("IF")
+        if eflags & 0x400:
+            flags.append("DF")
+        if eflags & 0x800:
+            flags.append("OF")
+
+        return "|".join(flags)
+
+    def _hook_code2(self, _uc, address, size, user_data):
+        # return
+        if self._current_inst_idx < 2:
             self._current_inst_idx += 1
             return
-        inst = self._current_insts[self._current_inst_idx - 3]
-        print(f" [{self._current_inst_idx}] [{_uc.reg_read(uc_x86.UC_X86_REG_RIP):x}] {inst}")
-        for reg in [X86Reg.RSP, self._current_state.vsp_reg]:
-            print(f"    {reg}: 0x{_uc.reg_read(reg.unicorn):x}")
-        reg_uses, reg_defs = inst.regs_access()
-        if reg_uses:
-            print("    ==== reg uses:")
-            for reg in reg_uses:
-                u_reg = X86Reg.from_capstone(reg)
-                print(f"    {u_reg}: 0x{_uc.reg_read(u_reg.unicorn):x}")
 
-        if reg_defs:
-            print("    ==== reg defs:")
-            for reg in reg_defs:
-                u_reg = X86Reg.from_capstone(reg)
-                print(f"    {u_reg}")
+        inst_idx = self._current_inst_idx - 2
+
+        curr_handler_idx = self._last_handler_idx
+
+        if self._last_handler_idx == -1:
+            self._last_handler_idx = 0
+        elif inst_idx > self._last_handler_end_i_idx:
+            self._last_handler_idx += 1
+
+        if curr_handler_idx != self._last_handler_idx:
+            handler = self._current_bb[self._last_handler_idx]
+            if self._last_handler_idx != 0:
+                print_handler = self._current_bb[self._last_handler_idx - 1]
+
+                v = _uc.reg_read(uc_x86.UC_X86_REG_EFLAGS)
+                print(f"  ==== EFLAGS: 0x{v:08x} {self._format_eflags(v)}")
+                print("  ==== VSP:")
+                for i in range(0, 5):
+                    addr = _uc.reg_read(self._current_state.vsp_reg.unicorn) + 8 * i
+                    v = st.unpack("<Q", _uc.mem_read(addr, 8))[0]
+                    print(f"  SP_{i}: [0x{addr:08x}] 0x{v:x}")
+                # print("  ==== VCTX:")
+                # for i in range(0, 30):
+                #     addr = _uc.reg_read(X86Reg.RSP.unicorn) + 8 * i
+                #     v = st.unpack("<Q", _uc.mem_read(addr, 8))[0]
+                #     print(f"  CTX_{i}: [0x{addr:08x}] 0x{v:x}")
+
+                print(f"Handler: {handler.virtualized_instruction}")
+
+            self._last_handler_end_i_idx += len(handler.underlying_instructions)
 
         self._current_inst_idx += 1
+
+        # inst = self._current_insts[self._current_inst_idx - 3]
+        # print(f" [{self._current_inst_idx}] [{_uc.reg_read(uc_x86.UC_X86_REG_RIP):x}] {inst}")
+        # for reg in [X86Reg.RSP, self._current_state.vsp_reg]:
+        #     print(f"    {reg}: 0x{_uc.reg_read(reg.unicorn):x}")
+        # reg_uses, reg_defs = inst.regs_access()
+        # if reg_uses:
+        #     print("    ==== reg uses:")
+        #     for reg in reg_uses:
+        #         u_reg = X86Reg.from_capstone(reg)
+        #         print(f"    {u_reg}: 0x{_uc.reg_read(u_reg.unicorn):x}")
+        #
+        # if reg_defs:
+        #     print("    ==== reg defs:")
+        #     for reg in reg_defs:
+        #         u_reg = X86Reg.from_capstone(reg)
+        #         print(f"    {u_reg}")
+        #
+        # print("    ==== VSP:")
+        # for i in range(-2, 2):
+        #     v = st.unpack("<Q", _uc.mem_read(_uc.reg_read(self._current_state.vsp_reg.unicorn) + 8 * i, 8))[0]
+        #     print(f"    SP_{i}: 0x{v:x}")
+        #
+        # print("    ==== EFLAGS:")
+        # v = _uc.reg_read(uc_x86.UC_X86_REG_EFLAGS)
+        # print(f"    EFLAGS: 0x{v:x}")
+        # self._current_inst_idx += 1
+
+    def _hook_code(self, uc, address, size, user_data):
+        state = self._current_state
+
+        def _is_mov_reg_mem(i):
+            return imatch(i, cs_x86.X86_INS_MOV, cs.CS_OP_REG, cs.CS_OP_MEM)
+
+        def _is_mov_mem_reg(i):
+            return imatch(i, cs_x86.X86_INS_MOV, cs.CS_OP_MEM, cs.CS_OP_REG)
+
+        def _is_mov_reg_imm(i):
+            return imatch(i, [cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVABS], cs.CS_OP_REG, cs.CS_OP_IMM)
+
+        def _is_mov_reg_reg(i):
+            return imatch(i, cs_x86.X86_INS_MOV, cs.CS_OP_REG, cs.CS_OP_REG)
+
+        def _is_pop_mem(i):
+            return imatch(i, cs_x86.X86_INS_POP, cs.CS_OP_MEM)
+
+        def _is_binary_reg_reg(i):
+            return imatch(i, [cs_x86.X86_INS_ADD, cs_x86.X86_INS_OR, cs_x86.X86_INS_AND,
+                          cs_x86.X86_INS_XOR, cs_x86.X86_INS_SHR], cs.CS_OP_REG, cs.CS_OP_REG)
+
+        inst = self._current_insts[self._current_inst_idx]
+        self._current_inst_idx += 1
+
+        def _cast_bv(_bv, _sz: int):
+            _target_bv_sz = _sz * 8
+            if _bv.size() < _target_bv_sz:
+                return z3.ZeroExt(_target_bv_sz - _bv.size(), _bv)
+            elif _bv.size() > _target_bv_sz:
+                return z3.Extract(_target_bv_sz - 1, 0, _bv)
+            else:
+                return _bv
+
+        def _imm_value(_imm: int, _sz: int):
+            _sz = 8
+            if _imm not in self._imm_vals:
+                _bv = z3.BitVec(f"imm_0x{_imm:x}", _sz * 8)
+                self._imm_vals[_imm] = _bv
+                self._val_imms[_bv] = _imm
+            return _cast_bv(self._imm_vals[_imm], _sz)
+
+        def _get_mem_address(_mem: cs_x86.X86OpMem):
+            _address = 0
+            if _mem.base != cs_x86.X86_REG_INVALID:
+                _address = uc.reg_read(_mem.base)
+            if _mem.index != cs_x86.X86_REG_INVALID:
+                _address += uc.reg_read(_mem.index) * _mem.scale
+            _address += _mem.disp
+            return _address
+
+        def _write_mem(_mem: cs_x86.X86OpMem, _bv):
+            _address = _get_mem_address(_mem)
+            self._mem_vals[_address] = _bv
+
+        def _read_mem_address(_address: int, _sz: int):
+            if _address not in self._mem_vals:
+                _mem_bytes = uc.mem_read(_address, _sz)
+                _val = unpack_int(_mem_bytes, _sz)
+                # _bv = z3.BitVec(f"mem_0x{_val:x}", _sz * 8)
+                # self._mem_vals[_address] = _bv
+                self._mem_vals[_address] = _imm_value(_val, _sz)
+            return _cast_bv(self._mem_vals[_address], _sz)
+
+        def _read_mem(_mem: cs_x86.X86OpMem, _sz: int):
+            _address = _get_mem_address(_mem)
+            return _read_mem_address(_address, _sz)
+
+        def _write_reg(_reg: int, _bv):
+            _u_reg = X86Reg.from_capstone(_reg).extended
+            self._reg_vals[_u_reg] = _bv
+
+        def _read_reg(_reg: int, _sz: int):
+            _u_reg = X86Reg.from_capstone(_reg).extended
+            if _u_reg not in self._reg_vals:
+                _val = uc.reg_read(_reg)
+                # _bv = z3.BitVec(f"reg_0x{_val:x}", _sz * 8)
+                # self._reg_vals[_u_reg] = _bv
+                self._reg_vals[_u_reg] = _imm_value(_val, _sz)
+            return _cast_bv(self._reg_vals[_u_reg], _sz)
+
+        def _read_rsp(_sz: int):
+            _address = uc.reg_read(uc_x86.UC_X86_REG_RSP)
+            return _read_mem_address(_address, _sz)
+
+        if _is_pop_mem(inst):
+            _write_mem(inst.operands[0].mem, _read_rsp(inst.operands[0].size))
+        elif _is_mov_reg_mem(inst):
+            _write_reg(inst.operands[0].reg, _read_mem(inst.operands[1].mem, inst.operands[0].size))
+        elif _is_mov_mem_reg(inst):
+            _write_mem(inst.operands[0].mem, _read_reg(inst.operands[1].reg, inst.operands[0].size))
+        elif _is_mov_reg_imm(inst):
+            _write_reg(inst.operands[0].reg, _imm_value(inst.operands[1].imm, inst.operands[0].size))
+        elif _is_mov_reg_reg(inst):
+            _write_reg(inst.operands[0].reg, _read_reg(inst.operands[1].reg, inst.operands[0].size))
+        elif _is_binary_reg_reg(inst):
+
+            a = _read_reg(inst.operands[0].reg, inst.operands[0].size)
+            b = _read_reg(inst.operands[1].reg, inst.operands[0].size)
+
+            if a.size() != b.size():
+                print(f"{inst.mnemonic} {b} asize: {a.size()}, bsize: {b.size()}")
+            assert a.size() == b.size() and "Binary operation on different sizes"
+
+            c = None
+            if inst.id == cs_x86.X86_INS_ADD:
+                c = a + b
+            elif inst.id == cs_x86.X86_INS_OR:
+                c = a | b
+            elif inst.id == cs_x86.X86_INS_AND:
+                c = a & b
+            elif inst.id == cs_x86.X86_INS_XOR:
+                c = a ^ b
+            elif inst.id == cs_x86.X86_INS_SHR:
+                c = a >> b
+
+            if c is None:
+                raise Exception(f"Unsupported binary instruction: {inst.mnemonic}")
+
+            _write_reg(inst.operands[0].reg, c)
+
+        elif imatch(inst, cs_x86.X86_INS_NOT, cs.CS_OP_REG):
+            a = _read_reg(inst.operands[0].reg, inst.operands[0].size)
+            _write_reg(inst.operands[0].reg, ~a)
 
     def __init__(self, binary: Binary):
         stack_base = 0xF000000000000000
@@ -48,8 +261,10 @@ class VMTracer:
 
         mu = uc.Uc(uc.UC_ARCH_X86, uc.UC_MODE_64)
 
-        # mu.hook_add(uc.UC_HOOK_MEM_READ_UNMAPPED | uc.UC_HOOK_MEM_WRITE_UNMAPPED, self._hook_invalid_mem)
-        # mu.hook_add(uc.UC_HOOK_CODE, self._hook_code)
+        mu.hook_add(uc.UC_HOOK_MEM_READ_UNMAPPED | uc.UC_HOOK_MEM_WRITE_UNMAPPED, self._hook_invalid_mem)
+        # mu.hook_add(uc.UC_HOOK_MEM_READ | uc.UC_HOOK_MEM_WRITE, self._hook_mem)
+        mu.hook_add(uc.UC_HOOK_CODE, self._hook_code)
+        # mu.hook_add(uc.UC_HOOK_INSN, self._hook_in, None, 1, 0, uc_x86.UC_X86_INS_OUT)
 
         # Setup stack
         mu.mem_map(stack_base, stack_size)
@@ -71,6 +286,15 @@ class VMTracer:
         self._current_state = None
         self._current_insts = []
         self._current_inst_idx = 0
+        self._current_bb = None
+        self._last_handler_idx = -1
+        self._last_handler_end_i_idx = 0
+        self._last_vsp = 0
+        self._vsp_base = 0
+        self._reg_vals = {}
+        self._mem_vals = {}
+        self._imm_vals = {}
+        self._val_imms = {}
 
     @property
     def emulator(self) -> uc.Uc:
@@ -81,37 +305,91 @@ class VMTracer:
         return self._binary
 
     def trace(self, initial_state: VMState, vm_bb: VMBasicBlock):
+        mu = self.emulator
         self._current_state = initial_state
+        self._current_bb = vm_bb
+        self._last_vsp = mu.reg_read(uc_x86.UC_X86_REG_RSP)
+
         image_base = self.binary.optional_header.imagebase
 
-        ks = get_shared_ks()
-        # create trace code
         init_code = f"mov {initial_state.vsp_reg.name}, RSP\n" \
-                    f"mov {initial_state.vip_reg.name}, 0x{initial_state.vip_rva + image_base:x}\n" \
-                    f"mov {initial_state.vrk_reg.name}, 0x{initial_state.rolling_key:x}".encode('utf-8')
-
-        code_bytes = bytes(ks.asm(init_code)[0])
-        code_bytes = code_bytes + vm_bb.code_bytes
-
+                    f"sub RSP, 0x180\n" \
+                    f"mov {initial_state.vip_reg.name}, 0x{initial_state.vip_rva + image_base:x}\n".encode('utf-8')
         insts = vm_bb.underlying_instructions
+        insts.insert(0, self._get_inst(f"mov {initial_state.vsp_reg.name}, RSP"))
+        insts.insert(1, self._get_inst(f"sub RSP, 0x180"))
+        insts.append(self._get_inst(f"mov RAX, [{initial_state.vsp_reg.name}]"))
+
         self._current_insts = insts
         self._current_inst_idx = 0
 
-        entry_va = image_base + vm_bb.entry_rva
+        code_bytes = b"".join([i.bytes for i in insts])
 
-        print("EntryVA", hex(entry_va))
-        # write trace code and execute
-        mu = self.emulator
+        entry_va = image_base + vm_bb.entry_rva
         mu.mem_write(entry_va, code_bytes)
         mu.emu_start(entry_va, entry_va + len(code_bytes))
 
-        # retrieve trace results
-        # VSP_REG: X86Reg.RSI
-        # VSP_REG: X86Reg.RBX
-        rsp = mu.mem_read(mu.reg_read(initial_state.vsp_reg.unicorn), 8)
-        print("NEW", hex(st.unpack("<Q", rsp)[0]))
+        val = mu.reg_read(uc_x86.UC_X86_REG_RAX)
+        print("Trace", hex(val))
 
-        return st.unpack("<Q", rsp)[0] - image_base
+        aaa = self._reg_vals[X86Reg.EAX.extended]
+        aaa = z3.simplify(aaa)
+        print("simplify", aaa)
+
+        def _find_cond(_expr):
+            _decl = _expr.decl()
+            if _decl.kind() == z3.Z3_OP_BOR:
+                return _expr.arg(0)
+            else:
+                for _idx in range(_expr.num_args()):
+                    _arg = _expr.arg(_idx)
+                    _cond = _find_cond(_arg)
+                    if _cond is not None:
+                        return _cond
+
+        def _get_all_constants(_expr, _vars):
+            if z3.is_const(_expr):
+                _vars.add(_expr)
+            for _idx in range(_expr.num_args()):
+                _arg = _expr.arg(_idx)
+                _get_all_constants(_arg, _vars)
+
+        def _sub_all_constants(_expr):
+            constants = set()
+            _get_all_constants(_expr, constants)
+            for c in constants:
+                if c in self._val_imms:
+                    _expr = z3.substitute(_expr, (c, z3.BitVecVal(self._val_imms[c], c.size())))
+            return _expr
+
+        cond = _find_cond(aaa)
+        if cond is not None:
+            print("Cond", cond)
+            cond_v = z3.BitVec('cond', cond.size())
+
+            aaa = z3.substitute(aaa, (cond, cond_v))
+            aaa = z3.substitute(aaa, (z3.simplify(~cond), ~cond_v))
+
+            cond = _sub_all_constants(cond)
+            cond = z3.simplify(cond)
+            cond_not = z3.simplify(~cond)
+            print("cond_v", cond, cond_not)
+
+            aaa = _sub_all_constants(aaa)
+            print("jump target", aaa)
+
+            aaa_v1 = z3.simplify(z3.substitute(aaa, (cond_v, cond)))
+            aaa_v2 = z3.simplify(z3.substitute(aaa, (cond_v, cond_not)))
+
+            print("target_1", aaa_v1, "target_2", aaa_v2)
+            # print("Sub", aaa)
+        # ast = aaa.ast
+        # print("ast", ast)
+        # print(aaa.ast)
+        # for i in ast.args():
+        #     print(i)
+
+        return val - image_base
 
 
 def update_vip_direction(state: VMState, cursor: int, ic: InstructionCollection):
@@ -160,10 +438,10 @@ def update_vip_direction(state: VMState, cursor: int, ic: InstructionCollection)
 
 
 def _decrypt(state: VMState, decryption_block: VMDecryptionBlock) -> VMDecryptedInfo:
-    encrypted = state.read_vip(decryption_block.value_size)
+    encrypted = state.read_vip(decryption_block.out_size)
     code_bytes = decryption_block.transforms.get_all_bytes()
 
-    encrypted = xor_sized(encrypted, state.rolling_key, decryption_block.value_size)
+    encrypted = xor_sized(encrypted, state.rolling_key, decryption_block.out_size)
     # print(f"  {encrypted_val:x}, {state.rolling_key:x}")
 
     out_reg_values = emulate_shared(code_bytes, {
@@ -173,11 +451,11 @@ def _decrypt(state: VMState, decryption_block: VMDecryptionBlock) -> VMDecrypted
     decrypted = out_reg_values[decryption_block.def_reg]
     # print(f"decrypted_val:  {decrypted_val:x}")
     # update rolling key
-    next_key = xor_sized(state.rolling_key, decrypted, decryption_block.value_size)
+    next_key = xor_sized(state.rolling_key, decrypted, decryption_block.out_size)
     state.update_rolling_key(next_key)
 
     d_info = VMDecryptedInfo(i_begin_index=decryption_block.i_begin_index, i_end_index=decryption_block.i_end_index,
-                             def_reg=decryption_block.def_reg, value_size=decryption_block.value_size, value=decrypted)
+                             def_reg=decryption_block.def_reg, out_size=decryption_block.out_size, value=decrypted)
 
     return d_info
 
@@ -200,13 +478,13 @@ def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollectio
         else:
             return False
 
-    idx, def_reg_i = ic.next_by(cursor, _def_finder)
+    def_idx, def_reg_i = ic.next_by(cursor, _def_finder)
 
-    if idx == -1:
+    if def_idx == -1:
         return None
 
     def_reg = X86Reg.from_capstone(def_reg_i.operands[0].reg)
-    value_size = def_reg_i.operands[1].size
+    out_size = def_reg_i.operands[1].size
 
     def _decryption_begin_finder(i):
         # ----------------------------------------------------
@@ -228,55 +506,41 @@ def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollectio
         if imatch(i, cs.x86.X86_INS_XOR, cs.CS_OP_MEM, cs.x86.X86_OP_REG):
             # ----------------------------------------------------
             # push vrk_reg
-            # xor [rsp], def_reg
+            # * xor [rsp], def_reg
             # pop vrk_reg
             # ----------------------------------------------------
             return def_reg.is_equal_to_capstone(i.operands[1].reg) and \
                    i.operands[0].mem.base == cs_x86.X86_REG_RSP and \
                    i.operands[0].mem.disp == 0 and \
-                   i.operands[0].mem.scale == 1
+                   i.operands[0].mem.scale == 1 and \
+                   i.operands[0].mem.index == cs_x86.X86_REG_INVALID
         return False
 
-    begin_idx, begin_i = ic.next_by(cursor, _decryption_begin_finder)
-    assert begin_idx != -1 and "decryption begin idx not found"
+    begin_idx = ic.next_index_by(def_idx + 1, _decryption_begin_finder)
+    barrier_idx = ic.next_index_by(begin_idx + 1, _def_finder)
 
-    assert def_reg.is_equal_to_capstone(begin_i.operands[0].reg) and "def_reg is not equal to begin_i.operands[0].reg"
-    # cast type
-    def_reg = X86Reg.from_capstone(begin_i.operands[0].reg)
+    assert begin_idx != -1 and "decryption begin_idx not found"
 
-    end_idx = ic.next_index_by(begin_idx + 1, _decryption_end_finder_1)
-
-    # assert end_idx != -1 and "decryption end idx not found"
-
-    def _push_finder(i):
-        return imatch(i, cs.x86.X86_INS_PUSH, cs.x86.X86_OP_REG) and \
-               state.vrk_reg.is_equal_to_capstone(i.operands[0].reg)
-
-    def _pop_finder(i):
-        return imatch(i, cs.x86.X86_INS_POP, cs.x86.X86_OP_REG) and \
-               state.vrk_reg.is_equal_to_capstone(i.operands[0].reg)
+    end_idx = ic.next_index_by(begin_idx + 1, _decryption_end_finder_2, barrier_idx)
 
     if end_idx != -1:
-        push_idx = ic.prev_index_by(end_idx, _push_finder)
-        pop_idx = ic.next_index_by(end_idx, _pop_finder)
-        if push_idx != -1 and push_idx < end_idx < pop_idx:
-            end_idx = ic.next_index_by(push_idx + 1, _decryption_end_finder_2)
+        def _pop_finder(i):
+            return imatch(i, cs.x86.X86_INS_POP, cs.x86.X86_OP_REG) and \
+                    i.operands[0].reg == state.vrk_reg.capstone
+        end_idx = ic.next_index_by(end_idx + 1, _pop_finder, barrier_idx)
     else:
-        end_idx = ic.next_index_by(begin_idx + 1, _decryption_end_finder_2)
+        end_idx = ic.next_index_by(begin_idx + 1, _decryption_end_finder_1, barrier_idx)
+
+    assert end_idx != -1 and "decryption end_idx not found"
 
     trans_ic, _ = ic.trace(def_reg.extended, begin_idx + 1, end_idx - 1)
+    # print(f"Begin: {begin_idx} | End: {end_idx} | Barrier: {barrier_idx} | Def: {def_idx}")
+    # for i in trans_ic:
+    #     print(i)
+    d_block = VMDecryptionBlock(i_begin_index=begin_idx, i_end_index=end_idx, def_reg=def_reg, out_size=out_size,
+                                transforms=trans_ic)
 
-    if imatch(ic[end_idx], cs.x86.X86_INS_XOR, cs.CS_OP_MEM, cs.x86.X86_OP_REG):
-        def _pop_finder2(i):
-            return imatch(i, cs.x86.X86_INS_POP, cs.x86.X86_OP_REG) and \
-                   state.vrk_reg.is_equal_to_capstone(i.operands[0].reg)
-
-        end_idx = ic.next_index_by(end_idx, _pop_finder2)
-
-    block = VMDecryptionBlock(i_begin_index=begin_idx, i_end_index=end_idx, def_reg=def_reg, value_size=value_size,
-                              transforms=trans_ic)
-
-    return block
+    return d_block
 
 
 def _next_decrypted(state: VMState, cursor: int, ic: InstructionCollection):
@@ -428,89 +692,86 @@ class VMSwapParser:
         # ----------------------------------------------------
         # mov r64, [vsp]
         # ----------------------------------------------------
-        if imatch(ic[0], cs_x86.X86_INS_MOV, cs.CS_OP_REG, cs.CS_OP_MEM):
-            read_vsp_i = ic[0]
+        read_vsp_i = ic[0]
+        if imatch(read_vsp_i, cs_x86.X86_INS_MOV, cs.CS_OP_REG, cs.CS_OP_MEM):
             vip_from_reg = X86Reg.from_capstone(read_vsp_i.operands[0].reg)
             # ----------------------------------------------------
             # movabs r64, imm
             # ----------------------------------------------------
             idx_mutation_end = ic.next_index(1, cs_x86.X86_INS_MOVABS, cs.CS_OP_REG, cs.CS_OP_IMM)
+            if idx_mutation_end == -1:
+                return None
 
-            reg_mapping = {}
-            for cs_reg in range(cs_x86.X86_REG_INVALID + 1, cs_x86.X86_REG_ENDING):
-                if X86Reg.capstone_convertible(cs_reg):
-                    u_reg = X86Reg.from_capstone(cs_reg).extended
-                    reg_mapping[u_reg] = [0, u_reg]
+            vip_chain = LinkedList[X86Reg]()
+            vip_chain.append(vip_from_reg)
 
+            vsp_chain = LinkedList[X86Reg]()
+            vsp_chain.append(state.vsp_reg)
+
+            last_mapping = {
+                vip_from_reg: vip_chain,
+                state.vsp_reg: vsp_chain
+            }  # type: dict[X86Reg, LinkedList[X86Reg]]
+            mapping_chains = [vip_chain, vsp_chain]  # type: [LinkedList[X86Reg]]
+
+            def _map(from_reg: X86Reg, to_reg: X86Reg):
+                if from_reg not in last_mapping:
+                    # junk mapping
+                    return
+
+                last_mapping[from_reg].append(to_reg)
+                last_mapping[to_reg] = last_mapping[from_reg]
+
+            prefix_end_idx = None
             for inst_idx in range(1, idx_mutation_end):
                 inst = ic[inst_idx]
 
-                if len(inst.operands) != 2:
-                    continue
-                if inst.operands[0].size != 8:
+                if len(inst.operands) != 2 or inst.operands[0].size != 8:
                     continue
 
+                changed = False
                 if imatch(inst, cs_x86.X86_INS_MOV, cs.CS_OP_REG, cs.CS_OP_REG):
-                    # ----------------------------------------------------
-                    # mov r64, r64
-                    # ----------------------------------------------------
                     r1 = X86Reg.from_capstone(inst.operands[0].reg)
                     r2 = X86Reg.from_capstone(inst.operands[1].reg)
-                    reg_mapping[r1] = (inst_idx, reg_mapping[r2][1])
+                    _map(r2, r1)
+                    changed = True
                 elif imatch(inst, cs_x86.X86_INS_XCHG, cs.CS_OP_REG, cs.CS_OP_REG):
-                    # ----------------------------------------------------
-                    # xchg r64, r64
-                    # ----------------------------------------------------
                     r1 = X86Reg.from_capstone(inst.operands[0].reg)
                     r2 = X86Reg.from_capstone(inst.operands[1].reg)
-                    # swap
-                    tmp = reg_mapping[r1][1]
-                    reg_mapping[r1][1] = (inst_idx, reg_mapping[r2][1])
-                    reg_mapping[r2][1] = tmp
+                    _map(r2, r1)
+                    _map(r1, r2)
+                    changed = True
+                if prefix_end_idx is None and changed:
+                    prefix_end_idx = inst_idx - 1
 
-                    reg_mapping[r1][0] = inst_idx
-                    reg_mapping[r2][1] = inst_idx
+            # for chain in mapping_chains:
+            #     # print(f"Last: {reg}")
+            #     print("new mapping chain: ")
+            #     node = chain.head
+            #     while node:
+            #         print("  ", node.value)
+            #         node = node.next
 
-            def _inherits_from(reg):
-                inheritance = []
-                for k, v in reg_mapping.items():
-                    if v[1] == reg:
-                        inheritance.append([v[0], k])
-                inheritance.sort(key=lambda x: x[0])
-                return inheritance
+            new_vrk_reg_node = vip_chain.tail
+            new_vip_reg_node = new_vrk_reg_node.prev
+            new_vsp_reg_node = vsp_chain.tail
 
-            vip_inh = _inherits_from(vip_from_reg)
-            vsp_inh = _inherits_from(state.vsp_reg)
-
-            if len(vip_inh) == 1:
-                vip_inh.insert(0, [0, vip_from_reg])
-
-            # print(vip_inh)
-            # print(vsp_inh)
-            new_vip_reg = vip_inh[0][1]
-            new_vsp_reg = state.vsp_reg if len(vsp_inh) == 0 else vsp_inh[-1][1]
-            new_vrk_reg = vip_inh[1][1]
-
-            pfx_end = vip_inh[0][0]
-            if vsp_inh:
-                pfx_end = max(pfx_end, vsp_inh[-1][0])
-
-            if pfx_end == 0 and len(vip_inh) >= 2:
-                pfx_end = pfx_end - vip_inh[1][0]
-
-            pfx_ic = ic.range_of(0, pfx_end)
-            pfx_ic = VMInstructionsOptimizer.process(state, [], pfx_ic)
-
+            prefix_ic = ic.range_of(1, prefix_end_idx)
+            prefix_ic = VMInstructionsOptimizer.process(state, [], prefix_ic)
+            # for i in prefix_ic:
+            #     print(i)
+            # print(f"After swap: VSP_REG: {new_vsp_reg_node}, VIP_REG: {new_vip_reg_node}, VRK_REG: {new_vrk_reg_node}")
             print(f"Before swap: VSP_REG: {state.vsp_reg} VIP_REG: {state.vip_reg} VRK_REG: {state.vrk_reg}")
-            state.swap(new_vsp_reg=new_vsp_reg, new_vip_reg=new_vip_reg, new_vrk_reg=new_vrk_reg)
+            state.swap(new_vsp_reg=new_vsp_reg_node.value, new_vip_reg=new_vip_reg_node.value,
+                       new_vrk_reg=new_vrk_reg_node.value)
             print(f"After swap: VSP_REG: {state.vsp_reg} VIP_REG: {state.vip_reg} VRK_REG: {state.vrk_reg}")
             update_vip_direction(state, idx_mutation_end + 1, ic)
 
-            return cls.Result(reloc_rva=reloc_rva, i_end_index=idx_mutation_end, prefix_ic=pfx_ic)
+            return cls.Result(reloc_rva=reloc_rva, i_end_index=idx_mutation_end, prefix_ic=prefix_ic)
         else:
             return None
 
-
+# tracer = None
 class VMHandlerParser:
 
     @classmethod
@@ -539,12 +800,14 @@ class VMHandlerParser:
 
         d_operand_infos = []
         operands = []
+        operand_sizes = []
 
         # decrypt all operands
         for op_idx in range(len(d_blks) - 1):
             d_info = _decrypt(state, d_blks[op_idx])
             d_operand_infos.append(d_info)
             operands.append(d_info.value)
+            operand_sizes.append(d_info.out_size)
             # print(f"{op_idx}, 0x{d_info.value:x}")
 
         # Discard calc_jmp_off routine
@@ -552,12 +815,14 @@ class VMHandlerParser:
         ic = VMInstructionsOptimizer.process(state, d_operand_infos, ic)
         if swap:
             ic = swap.prefix_ic + ic
-        v_inst = VMInstructions.classify(state, ic)
+        v_inst = VMInstructions.classify(state, operands, operand_sizes, ic)
 
         if v_inst.op == 'VJMP':
-            print('VJMP hit')
-            tracer = VMTracer(state.binary)
-            next_vip = tracer.trace(initial_state, vm_basic_block)
+            # tracer = VMTracer(state.binary)
+            # next_vip = tracer.trace(initial_state, vm_basic_block)
+            branches = VMBranchAnalyzer.analyze(initial_state, vm_basic_block)
+            print("Branches", branches)
+            next_vip = branches[0]
             next_rolling_key = state.binary.imagebase + next_vip
             state._vip_rva = next_vip
             state._rolling_key = next_rolling_key
@@ -570,4 +835,6 @@ class VMHandlerParser:
         next_rva = Mod2NInt.normalize(jmp_base + jmp_off, 32)
 
         handler = VMHandler(rva=ic[0].address, next_rva=next_rva, v_inst=v_inst, operands=operands, ic=ic)
+        vm_basic_block.add_handler(handler)
+
         return handler

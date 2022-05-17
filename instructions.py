@@ -730,7 +730,7 @@ class VREADUDescriptor(VMOpcodeDescriptor):
         dt = 0 if var[0] == 8 else 1
         sz = 2 if var[0] == 1 else var[0]
 
-        return len(ic) == 3 and \
+        return len(ic) == (3 + dt) and \
                self.i_read_vsp(state, ic[0], 0, 8) and \
                ic[1].id in [cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX] and \
                ic[1].operands[1].type == cs_x86.X86_OP_MEM and \
@@ -1061,8 +1061,39 @@ class VMInstructions:
         'VPUSHCR3': VPUSHCR3Descriptor()
     }
 
+    # @classmethod
+    # def classify(cls, state: VMState, operands: [int], operand_sizes: [int], ic: InstructionCollection):
+    #     out = VMInstruction()
+    #     out.ic = ic
+    #     out.op = "VUNK"
+    #     out.parameters = operands
+    #     out.parameter_sizes = operand_sizes
+    #
+    #     for op_id, op_desc in cls._opcodes.items():
+    #         if op_desc.reduce(state, out, op_id):
+    #             break
+    #
+    #     if out.op == "VUNK":
+    #         out.op = "VEMIT"
+    #         out.parameters = {0xCC}
+    #         out.parameter_sizes = {1}
+    #
+    #     # print(f"StackDelta: {out.stack_delta:x},"
+    #     #       f"Parameters: {len(out.parameters)} "
+    #     #       f"ParameterSizes: {len(out.parameter_sizes)} "
+    #     #       f"StackWrites: {len(out.stack_writes)} "
+    #     #       f"StackReads: {len(out.stack_reads)} "
+    #     #       f"ContextWrites: {len(out.context_writes)} "
+    #     #       f"ContextReads: {len(out.context_reads)}")
+    #     # ps = ''
+    #     # for p in out.parameters:
+    #     #     # ps += f"0x{p:x} "
+    #     #     ps += f"{p} "
+    #     # print(f"OP: {out.op} ps: {ps}")
+    #     # return out
+
     @classmethod
-    def classify(cls, state: VMState, ic: InstructionCollection):
+    def classify(cls, state: VMState, operands: [int], operand_sizes: [int], ic: InstructionCollection):
 
         out = VMInstruction()
         out.op = "VUNK"
@@ -1176,10 +1207,13 @@ class VMInstructions:
                     out.context_reads.append(read_offset)
 
         # Extract parameters
-        for inst in ic:
-            if imatch(inst, [cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVABS], cs_x86.X86_OP_REG, cs_x86.X86_OP_IMM):
-                out.parameter_sizes.append(inst.operands[0].size)
-                out.parameters.append(inst.operands[1].imm)
+        # for inst in ic:
+        #     if imatch(inst, [cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVABS], cs_x86.X86_OP_REG, cs_x86.X86_OP_IMM):
+        #         out.parameter_sizes.append(inst.operands[0].size)
+        #         out.parameters.append(inst.operands[1].imm)
+
+        out.parameters = operands
+        out.parameter_sizes = operand_sizes
 
         for op_id, op_desc in cls._opcodes.items():
             if op_desc.reduce(state, out, op_id):
@@ -1190,12 +1224,12 @@ class VMInstructions:
             out.parameters = {0xCC}
             out.parameter_sizes = {1}
 
-        print(f"StackDelta: {out.stack_delta:x},"
-              f"Parameters: {len(out.parameters)} "
-              f"ParameterSizes: {len(out.parameter_sizes)} "
-              f"StackWrites: {len(out.stack_writes)} "
-              f"StackReads: {len(out.stack_reads)} "
-              f"ContextWrites: {len(out.context_writes)} "
-              f"ContextReads: {len(out.context_reads)}")
+        # print(f"StackDelta: {out.stack_delta:x},"
+        #       f"Parameters: {len(out.parameters)} "
+        #       f"ParameterSizes: {len(out.parameter_sizes)} "
+        #       f"StackWrites: {len(out.stack_writes)} "
+        #       f"StackReads: {len(out.stack_reads)} "
+        #       f"ContextWrites: {len(out.context_writes)} "
+        #       f"ContextReads: {len(out.context_reads)}")
         print(f"OP: {out.op}")
         return out

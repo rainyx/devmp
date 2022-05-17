@@ -8,7 +8,7 @@ import unicorn as uc
 import unicorn.x86_const as uc_x86
 import lief
 
-from entities import VMState, VMHandler, INVALID_RVA, VMBasicBlock
+from entities import VMState, VMHandler, INVALID_RVA, VMBasicBlock, VIPDirection
 from subroutines import VMEntryParser, VMHandlerParser
 from universal import X86Reg
 from utils import imatch, InstructionCollection, Mod2NInt, get_shared_md, emulate_shared
@@ -95,58 +95,41 @@ class VMP:
         initial_state = state.duplicate()
         vm_bb = VMBasicBlock()
         while True:
-            print(f"Unroll 0x{handler_rva:x} VIP: 0x{state.vip_rva:x} VRK: 0x{state.rolling_key:x}")
+            # print(f"Unroll 0x{handler_rva:x}, VIP: 0x{state.vip_rva:x}, VRK: 0x{state.rolling_key:x}, "
+            #       f"VIP_REG: {state.vip_reg}, VSP_REG: {state.vsp_reg}, VRK_REG: {state.vrk_reg}")
             ic = self._deobfuscate(handler_rva, debug=False)
             handler = VMHandlerParser.try_parse(state, handler_rva, initial_state, vm_bb, ic)
-            vm_bb.add_handler(handler)
 
-            handler_rva = handler.next_rva
-
-    # def _unroll(self, state: VMState, handler_rva: int):
-    #     initial_state = state.duplicate()
-    #     vm_bb = VMBasicBlock()
-    #     while True:
-    #         print(f"Unroll 0x{handler_rva:x} VIP: 0x{state.vip_rva:x} VRK: 0x{state.rolling_key:x}")
-    #         ic = self._deobfuscate(handler_rva, debug=False)
-    #         handler = VMHandlerParser.parse(state, ic)
-    #         vm_bb.add_handler(handler)
-    #
-    #         if handler.virtualized_instruction.op == "VJMP":
-    #
-    #             print("Found VJMP")
-    #             next_vip = self._trace_block(initial_state, vm_bb)
-    #             new_state = state.duplicate()
-    #
-    #             for p in handler.parameters:
-    #                 print(p)
-    #             new_state._vip_rva = next_vip
-    #             new_state.update_rolling_key(self.binary.optional_header.imagebase + next_vip)
-    #             jmp_off = new_state.read_vip(4)
-    #
-    #             db = handler.parameters[0]
-    #             db._encrypted = jmp_off
-    #             db._key = new_state.rolling_key
-    #             db.decrypt(new_state)
-    #
-    #             handler_rva = Mod2NInt.normalize(state.reloc_rva + handler.next_rva, 32)
-    #             print(hex(db.decrypted + state.reloc_rva))
-    #             print(hex(db.decrypted))
-    #             print(hex(state.rolling_key))
-    #             break
-    #         elif handler.next_rva != INVALID_RVA:
-    #             handler_rva = handler.next_rva
-    #             break
-    #         else:
-    #             break
+            if handler.virtualized_instruction.op == 'VJMP':
+                self._unroll(state, handler.next_rva)
+                break
+            else:
+                handler_rva = handler.next_rva
 
     def _parse_vm_entry(self, vm_entry_rva):
         print(f"Processing VMEntry at 0x{vm_entry_rva:x}")
         ic = self._deobfuscate(vm_entry_rva)
 
         state, first_handler_rva = VMEntryParser.parse(self.binary, ic)
-        # first_handler_rva = 0xafaba
-        # state._vip_rva = 0x5972
-        # state._rolling_key = 0xfffffffffffe3ae2
+
+        # state = VMState(binary=self.binary,
+        #                 vsp_reg=X86Reg.RBX,
+        #                 vip_reg=X86Reg.R9,
+        #                 vrk_reg=X86Reg.RDI,
+        #                 vip_rva=0x5e2a,
+        #                 rolling_key=0xfff437b6,
+        #                 reloc_rva=INVALID_RVA,
+        #                 vip_direction=VIPDirection.BACKWARD)
+        # first_handler_rva = 0xd896a
+        # state = VMState(binary=self.binary,
+        #                 vsp_reg=X86Reg.RBX,
+        #                 vip_reg=X86Reg.R9,
+        #                 vrk_reg=X86Reg.RDI,
+        #                 vip_rva=0x5c74,
+        #                 rolling_key=0xfffffffffff16f8a,
+        #                 reloc_rva=INVALID_RVA,
+        #                 vip_direction=VIPDirection.BACKWARD)
+        # first_handler_rva = 0x1529a
         self._unroll(state, first_handler_rva)
 
     def process(self):

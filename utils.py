@@ -6,22 +6,58 @@ import keystone as ks
 import keystone.x86_const as ks_x86
 from universal import X86Reg
 from typing import TypeVar, Generic
+import struct as st
 
 T = TypeVar('T')
 
 
-class IndexValuePair(Generic[T]):
-    def __init__(self, index, value: T):
-        self._index = index
-        self._value = value
+class LinkedList(Generic[T]):
+    class Node:
+        def __init__(self, value:T):
+            self._value = value
+            self._next = None
+            self._prev = None
+
+        @property
+        def value(self) -> T:
+            return self._value
+
+        @value.setter
+        def value(self, value:T):
+            self._value = value
+
+        @property
+        def next(self) -> 'LinkedList[T].Node':
+            return self._next
+
+        @property
+        def prev(self) -> 'LinkedList[T].Node':
+            return self._prev
+
+        def __str__(self):
+            return f"[LinkedListNode: {id(self):x}] {self.value}"
+
+    def __init__(self):
+        self._head = None
+        self._tail = None
+
+    def append(self, value:T):
+        node = self.Node(value)
+        if self._head is None:
+            self._head = node
+            self._tail = node
+        else:
+            self._tail._next = node
+            node._prev = self._tail
+            self._tail = node
 
     @property
-    def index(self) -> int:
-        return self._index
+    def head(self) -> Node:
+        return self._head
 
     @property
-    def value(self) -> T:
-        return self._value
+    def tail(self) -> Node:
+        return self._tail
 
 
 _shared_md = None
@@ -226,17 +262,19 @@ class InstructionCollection:
         idx, _ = self.next(from_idx, inst_id, *op_types)
         return idx
 
-    def next_by(self, from_idx, finder):
+    def next_by(self, from_idx, finder, barrier_idx=-1):
         idx = max(0, from_idx)
-        while idx < len(self._insts):
+        if barrier_idx == -1:
+            barrier_idx = len(self._insts)
+        while idx < barrier_idx:
             inst = self._insts[idx]
             if finder(inst):
                 return idx, inst
             idx += 1
         return -1, None
 
-    def next_index_by(self, from_idx, finder):
-        idx, _ = self.next_by(from_idx, finder)
+    def next_index_by(self, from_idx, finder, barrier_idx=-1):
+        idx, _ = self.next_by(from_idx, finder, barrier_idx)
         return idx
 
     def get_bytes(self, from_idx, to_idx):
@@ -248,30 +286,26 @@ class InstructionCollection:
     def get_all_bytes(self):
         return self.get_bytes(0, len(self._insts) - 1)
 
-    def trace(self, regs, from_idx, to_idx, user_tracer=None):
+    def trace(self, regs, from_idx, to_idx):
         if type(regs) is not list:
             regs = [regs]
-        depends_regs = set(regs)
+        depends_regs = set([r.extended for r in regs])
         sub_insts = []
-        idx = to_idx
-        while idx >= from_idx:
-            inst = self._insts[idx]
+
+        for inst in reversed(self._insts[from_idx:to_idx + 1]):
+            write = False
             use_regs, def_regs = inst.regs_access()
-            if user_tracer and user_tracer(inst):
+
+            for r in def_regs:
+                if X86Reg.from_capstone(r).extended in depends_regs:
+                    write = True
+                    break
+
+            if write:
+                for r in use_regs:
+                    depends_regs.add(X86Reg.from_capstone(r).extended)
                 sub_insts.insert(0, inst)
-            else:
-                write = False
-                for r in def_regs:
-                    if X86Reg.from_capstone(r).extended in depends_regs:
-                        write = True
-                        break
-                if write:
-                    sub_insts.insert(0, inst)
 
-            for r in use_regs:
-                depends_regs.add(X86Reg.from_capstone(r).extended)
-
-            idx = idx - 1
         return InstructionCollection(sub_insts), depends_regs
 
     def replace_with(self, from_idx, to_idx, insts):
@@ -308,3 +342,36 @@ class InstructionCollection:
     def __add__(self, other):
         return self.__class__(self._insts + other._insts)
 
+
+def unpack_int(val_bytes: bytes, size: int) -> int:
+    if size == 1:
+        return st.unpack("<B", val_bytes)[0]
+    elif size == 2:
+        return st.unpack("<H", val_bytes)[0]
+    elif size == 4:
+        return st.unpack("<I", val_bytes)[0]
+    elif size == 8:
+        return st.unpack("<Q", val_bytes)[0]
+    else:
+        raise ValueError("Invalid size: {}".format(size))
+
+
+def pack_int(int_val: int, size: int) -> bytes:
+    if size == 1:
+        return st.pack("<B", int_val)
+    elif size == 2:
+        return st.pack("<H", int_val)
+    elif size == 4:
+        return st.pack("<I", int_val)
+    elif size == 8:
+        return st.pack("<Q", int_val)
+    else:
+        raise ValueError("Invalid size: {}".format(size))
+
+
+def str_to_cs_inst(inst_str: str, address: int = 0) -> cs.CsInsn:
+    a = get_shared_ks()
+    d = get_shared_md()
+    code_bytes = bytes(a.asm(inst_str.encode('utf-8'))[0])
+    inst = next(d.disasm(code_bytes, address))
+    return inst

@@ -4,7 +4,7 @@ from universal import X86Reg
 from lief.PE import Binary
 import struct as st
 
-from utils import xor_sized, InstructionCollection, Mod2NInt, emulate_shared
+from utils import InstructionCollection
 
 INVALID_RVA = -1
 
@@ -84,30 +84,30 @@ class VMState:
     def update_rolling_key(self, new_key: int):
         self._rolling_key = new_key
 
-    def read_vip(self, value_size: int) -> int:
+    def read_vip(self, out_size: int) -> int:
         assert self.vip_direction != VIPDirection.UNSPECIFIED and "VIP direction not set"
-        assert value_size in [1, 2, 4, 8] and "Invalid value_size"
+        assert out_size in [1, 2, 4, 8] and "Invalid out_size"
         if self._vip_sec is None:
             self._vip_sec = self._binary.section_from_rva(self._vip_rva)
 
-        value_off = self._vip_rva - self._vip_sec.virtual_address
+        data_off = self._vip_rva - self._vip_sec.virtual_address
         if self.vip_direction == VIPDirection.BACKWARD:
-            value_off -= value_size
+            data_off -= out_size
 
-        value_bytes = self._vip_sec.content[value_off:value_off + value_size].tobytes()
-        if value_size == 1:
-            value = st.unpack('<B', value_bytes)[0]
-        elif value_size == 2:
-            value = st.unpack('<H', value_bytes)[0]
-        elif value_size == 4:
-            value = st.unpack('<I', value_bytes)[0]
-        elif value_size == 8:
-            value = st.unpack('<Q', value_bytes)[0]
+        data_bytes = self._vip_sec.content[data_off:data_off + out_size].tobytes()
+        if out_size == 1:
+            data = st.unpack('<B', data_bytes)[0]
+        elif out_size == 2:
+            data = st.unpack('<H', data_bytes)[0]
+        elif out_size == 4:
+            data = st.unpack('<I', data_bytes)[0]
+        elif out_size == 8:
+            data = st.unpack('<Q', data_bytes)[0]
         else:
-            raise Exception("Incorrect val_sz: " + str(value_size))
+            raise Exception("Incorrect val_sz: " + str(out_size))
 
-        self._forward(value_size)
-        return value
+        self._forward(out_size)
+        return data
 
     def _forward(self, sz: int):
         assert self.vip_direction != VIPDirection.UNSPECIFIED and "VIP direction not set"
@@ -123,12 +123,12 @@ class VMState:
 
 
 class VMDecryptionBlock:
-    def __init__(self, i_begin_index: int, i_end_index: int, def_reg: X86Reg, value_size: int,
+    def __init__(self, i_begin_index: int, i_end_index: int, def_reg: X86Reg, out_size: int,
                  transforms: InstructionCollection):
         self._i_begin_index = i_begin_index
         self._i_end_index = i_end_index
         self._def_reg = def_reg
-        self._value_size = value_size
+        self._out_size = out_size
         self._transforms = transforms
 
     @property
@@ -144,8 +144,8 @@ class VMDecryptionBlock:
         return self._def_reg
 
     @property
-    def value_size(self) -> int:
-        return self._value_size
+    def out_size(self) -> int:
+        return self._out_size
 
     @property
     def transforms(self) -> InstructionCollection:
@@ -153,11 +153,11 @@ class VMDecryptionBlock:
 
 
 class VMDecryptedInfo:
-    def __init__(self, i_begin_index: int, i_end_index: int, def_reg: X86Reg, value_size: int, value: int):
+    def __init__(self, i_begin_index: int, i_end_index: int, def_reg: X86Reg, out_size: int, value: int):
         self._i_begin_index = i_begin_index
         self._i_end_index = i_end_index
         self._def_reg = def_reg
-        self._value_size = value_size
+        self._out_size = out_size
         self._value = value
 
     @property
@@ -173,8 +173,8 @@ class VMDecryptedInfo:
         return self._def_reg
 
     @property
-    def value_size(self) -> int:
-        return self._value_size
+    def out_size(self) -> int:
+        return self._out_size
 
     @property
     def value(self) -> int:
@@ -197,6 +197,9 @@ class VMInstruction:
 
         self.ic = None
 
+    def __str__(self):
+        return f"[VMInst 0x{id(self):x}] OP: {self.op} OPS: {', '.join(map(str, self.parameters))} "
+
 
 class VMHandler:
 
@@ -218,6 +221,10 @@ class VMHandler:
     @property
     def next_rva(self) -> int:
         return self._next_rva
+
+    @next_rva.setter
+    def next_rva(self, new_rva: int):
+        self._next_rva = new_rva
 
     @property
     def underlying_instructions(self) -> InstructionCollection:
@@ -266,3 +273,6 @@ class VMBasicBlock:
         for handler in self.handlers:
             insts += handler.underlying_instructions.to_list()
         return insts
+
+    def __getitem__(self, item):
+        return self._handlers[item]

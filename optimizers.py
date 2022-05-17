@@ -48,6 +48,9 @@ class VMInstructionsOptimizer:
     def _dead_code_elimination(cls, state: VMState, ic: InstructionCollection):
         o_ic = ic.duplicate()
 
+        # for i in o_ic:
+        #     print(i)
+
         last_defs = {}
         def_use_chain = _DefUseChain()
 
@@ -60,6 +63,15 @@ class VMInstructionsOptimizer:
 
         candidates = []
         for inst in o_ic:
+
+            if inst.id in [cs_x86.X86_INS_CQO, cs_x86.X86_INS_CWD,
+                           cs_x86.X86_INS_CBW, cs_x86.X86_INS_CWDE,
+                           cs_x86.X86_INS_CDQ, cs_x86.X86_INS_CDQE,
+                           cs_x86.X86_INS_LAHF, cs_x86.X86_INS_TEST,
+                           cs_x86.X86_INS_CMP]:
+                candidates.append(inst)
+                continue
+
             is_side_effects_inst = False
             if inst.id == cs_x86.X86_INS_PUSHFQ:
                 is_side_effects_inst = True
@@ -115,11 +127,11 @@ class VMInstructionsOptimizer:
             else:
                 break
 
-        print("reduced")
-        for inst in o_ic:
-            print("  ", inst)
+        # print("reduced")
+        # for inst in o_ic:
+        #     print("  ", inst)
 
-        print("After dead code elimination: ", len(o_ic), len(ic))
+        # print("After dead code elimination: ", len(o_ic), len(ic))
         return o_ic
 
     @classmethod
@@ -139,7 +151,7 @@ class VMInstructionsOptimizer:
             # print("  ", value.blk_start - diff_sz, value.blk_end - diff_sz)
             diff_sz += o_ic.replace_with(d_info.i_begin_index - diff_sz, d_info.i_end_index - diff_sz, [load_c_inst])
 
-        print("After lower encryption blocks: ", len(o_ic), len(ic))
+        # print("After lower encryption blocks: ", len(o_ic), len(ic))
         # for inst in o_ic:
         #     print("  ", inst)
         return o_ic
