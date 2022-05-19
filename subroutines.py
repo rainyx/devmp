@@ -822,7 +822,7 @@ class VMHandlerParser:
             # next_vip = tracer.trace(initial_state, vm_basic_block)
             branches = VMBranchAnalyzer.analyze(initial_state, vm_basic_block)
             print("Branches", branches)
-            next_vip = branches[0]
+            next_vip = branches[-1]
             next_rolling_key = state.binary.imagebase + next_vip
             state._vip_rva = next_vip
             state._rolling_key = next_rolling_key

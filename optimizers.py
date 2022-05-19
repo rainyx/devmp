@@ -162,7 +162,7 @@ class VMInstructionsOptimizer:
         ja_idx = ic.next_index(0, cs_x86.X86_INS_JA)
         if ja_idx != -1:
             # print("Found JA, ", ja_idx, len(o_ic))
-            o_ic.resize(ja_idx)
+            o_ic.head(ja_idx)
 
         o_ic = cls._lower_encryption_blocks(state, values, o_ic)
         o_ic = cls._dead_code_elimination(state, o_ic)

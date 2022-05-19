@@ -321,9 +321,6 @@ class InstructionCollection:
     def remove(self, inst):
         self._insts.remove(inst)
 
-    def resize(self, new_size):
-        self._insts = self._insts[:new_size]
-
     def tail(self, begin_idx):
         return self.__class__(self._insts[begin_idx:])
 

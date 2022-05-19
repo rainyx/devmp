@@ -95,7 +95,6 @@ class VMSymbolicExecutor:
                           cs_x86.X86_INS_XOR, cs_x86.X86_INS_SHR], cs.CS_OP_REG, cs.CS_OP_REG)
 
     def _get_imm_value(self, imm: int, sz: int):
-        sz = 8
         if imm not in self._imm_vals:
             bv = z3.BitVec(f"imm_0x{imm:x}", sz * 8)
             self._imm_vals[imm] = bv
@@ -119,8 +118,6 @@ class VMSymbolicExecutor:
         if address not in self._mem_vals:
             mem_bytes = self.emulator.mem_read(address, sz)
             val = unpack_int(mem_bytes, sz)
-            # _bv = z3.BitVec(f"mem_0x{_val:x}", _sz * 8)
-            # self._mem_vals[_address] = _bv
             self._mem_vals[address] = self._get_imm_value(val, sz)
         return self._cast_bv(self._mem_vals[address], sz)
 
@@ -136,8 +133,6 @@ class VMSymbolicExecutor:
         u_reg = X86Reg.from_capstone(reg).extended
         if u_reg not in self._reg_vals:
             val = self.emulator.reg_read(reg)
-            # _bv = z3.BitVec(f"reg_0x{_val:x}", _sz * 8)
-            # self._reg_vals[_u_reg] = _bv
             self._reg_vals[u_reg] = self._get_imm_value(val, sz)
         return self._cast_bv(self._reg_vals[u_reg], sz)
 
@@ -237,6 +232,8 @@ class VMBranchAnalyzer:
         e_state = executor.execute(insts)
 
         dest_expr = e_state.get_symbolic_register(X86Reg.RAX)
+        dest_expr = z3.simplify(dest_expr)
+
         cnd = cls._find_condition(dest_expr)
 
         if cnd is None:
@@ -245,7 +242,8 @@ class VMBranchAnalyzer:
         else:
             inv_cnd = z3.simplify(~cnd)
             cnd_val = z3.BitVec("cond_val", cnd.size())
-            dest_expr = z3.substitute(dest_expr, (cnd, cnd_val, inv_cnd, ~cnd_val))
+            dest_expr = z3.substitute(dest_expr, (cnd, cnd_val))
+            dest_expr = z3.substitute(dest_expr, (inv_cnd, ~cnd_val))
             dest_expr = e_state.substitute_all_constants(dest_expr)
 
             cnd = z3.simplify(e_state.substitute_all_constants(cnd))
