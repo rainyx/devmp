@@ -1,3 +1,5 @@
+from typing import NoReturn
+
 import capstone as cs
 import capstone.x86 as cs_x86
 
@@ -11,7 +13,7 @@ class _DefUseChain:
         self._uses = {}
         self._users = {}
 
-    def add_use(self, i: int, use: int):
+    def add_use(self, i: int, use: int) -> NoReturn:
         if i not in self._uses:
             self._uses[i] = set()
         if use not in self._users:
@@ -20,14 +22,14 @@ class _DefUseChain:
         self._uses[i].add(use)
         self._users[use].add(i)
 
-    def remove_use(self, i: int, use: int):
+    def remove_use(self, i: int, use: int) -> NoReturn:
         self._uses[i].remove(use)
         self._users[use].remove(i)
 
-    def has_users(self, i: int):
+    def has_users(self, i: int) -> bool:
         return i in self._users and len(self._users[i]) > 0
 
-    def remove_all_uses(self, i: int):
+    def remove_all_uses(self, i: int) -> NoReturn:
         if i not in self._uses:
             return
         for use in self._uses[i]:
@@ -45,7 +47,7 @@ class VMInstructionsOptimizer:
         return code_bytes
 
     @classmethod
-    def _dead_code_elimination(cls, state: VMState, ic: InstructionCollection):
+    def _eliminate_dead_code(cls, state: VMState, ic: InstructionCollection) -> InstructionCollection:
         o_ic = ic.duplicate()
 
         # for i in o_ic:
@@ -135,7 +137,8 @@ class VMInstructionsOptimizer:
         return o_ic
 
     @classmethod
-    def _lower_encryption_blocks(cls, state: VMState, decrypted_infos: [VMDecryptedInfo], ic: InstructionCollection):
+    def _lower_encryption_blocks(cls, state: VMState, decrypted_infos: [VMDecryptedInfo], ic: InstructionCollection) \
+            -> InstructionCollection:
         if not decrypted_infos:
             return ic
 
@@ -157,7 +160,7 @@ class VMInstructionsOptimizer:
         return o_ic
 
     @classmethod
-    def process(cls, state: VMState, values: [], ic: InstructionCollection):
+    def process(cls, state: VMState, values: [], ic: InstructionCollection) -> InstructionCollection:
         o_ic = ic.duplicate()
         ja_idx = ic.next_index(0, cs_x86.X86_INS_JA)
         if ja_idx != -1:
@@ -165,88 +168,5 @@ class VMInstructionsOptimizer:
             o_ic.head(ja_idx)
 
         o_ic = cls._lower_encryption_blocks(state, values, o_ic)
-        o_ic = cls._dead_code_elimination(state, o_ic)
+        o_ic = cls._eliminate_dead_code(state, o_ic)
         return o_ic
-
-        # reduced_insts = []
-        # while inst_idx >= 0:
-        #     inst = o_ic[inst_idx]
-        #
-        #     if inst.id in (cs_x86.X86_INS_CQO, cs_x86.X86_INS_CWD,
-        #                    cs_x86.X86_INS_CBW, cs_x86.X86_INS_CWDE,
-        #                    cs_x86.X86_INS_CDQ, cs_x86.X86_INS_CDQE,
-        #                    cs_x86.X86_INS_LAHF, cs_x86.X86_INS_TEST,
-        #                    cs_x86.X86_INS_CMP):
-        #         inst_idx -= 1
-        #         continue
-        #
-        #     if imatch(inst, cs_x86.X86_INS_LEA, cs_x86.X86_OP_REG, cs_x86.X86_OP_MEM) and \
-        #             inst.operands[1].mem.disp == -7 and \
-        #             inst.operands[1].scale == 1 and \
-        #             inst.operands[1].mem.base == cs_x86.X86_REG_RIP and \
-        #             inst.operands[1].mem.index == cs_x86.X86_REG_INVALID:
-        #         reduced_insts.insert(0, inst)
-        #         inst_idx -= 1
-        #         continue
-        #
-        #     if inst.id == cs_x86.X86_INS_PUSHFQ:
-        #         reduced_insts.insert(0, inst)
-        #         inst_idx -= 1
-        #         continue
-        #
-        #     reads = {}
-        #     writes = {}
-        #     mem_read = 0
-        #     mem_write = 0
-        #     for op in inst.operands:
-        #         if op.type == cs_x86.X86_OP_REG:
-        #             if op.access & cs.CS_AC_READ:
-        #                 reads[X86Reg.from_capstone(op.reg).extended] = True
-        #             if op.access & cs.CS_AC_WRITE:
-        #                 writes[X86Reg.from_capstone(op.reg).extended] = True
-        #         elif op.type == cs_x86.X86_OP_MEM:
-        #             for reg in (op.mem.base, op.mem.index):
-        #                 if reg == cs_x86.X86_REG_INVALID:
-        #                     continue
-        #                 reads[X86Reg.from_capstone(reg).extended] = True
-        #             mem_read |= op.access & cs.CS_AC_READ
-        #             mem_write |= op.access & cs.CS_AC_WRITE
-        #
-        #     reg_uses, reg_defs = inst.regs_access()
-        #     for r in reg_uses:
-        #         u_reg = X86Reg.from_capstone(r).extended
-        #         if u_reg == X86Reg.EFLAGS or u_reg == X86Reg.RSP:
-        #             continue
-        #         if inst.id == cs_x86.X86_INS_CPUID and u_reg == X86Reg.RCX:
-        #             continue
-        #         reads[u_reg] = True
-        #
-        #     for r in reg_defs:
-        #         u_reg = X86Reg.from_capstone(r).extended
-        #         if r == cs_x86.X86_REG_EFLAGS or r == cs_x86.X86_REG_RSP:
-        #             continue
-        #         writes[u_reg] = True
-        #
-        #     should_be_tracked = mem_write
-        #     for tr, tv in traced.items():
-        #         if tr in writes:
-        #             should_be_tracked |= True
-        #
-        #     if should_be_tracked:
-        #         for wr, wv in writes.items():
-        #             if wr not in traced:
-        #                 traced[wr] = False
-        #             traced[wr] &= not wv
-        #
-        #         for rd, rv in reads.items():
-        #             if rd not in traced:
-        #                 traced[rd] = False
-        #             traced[rd] |= rv
-        #
-        #         reduced_insts.insert(0, inst)
-        #
-        #     inst_idx -= 1
-        #
-        # for i in reduced_insts:
-        #     print(i)
-        # return InstructionCollection(reduced_insts)

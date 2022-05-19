@@ -1,10 +1,94 @@
 import capstone as cs
 import capstone.x86 as cs_x86
-from lief.PE import Binary
-import struct as st
-from utils import InstructionCollection, xor_sized, imatch
-from universal import X86Reg
+
 from entities import VMState, VMInstruction
+from universal import X86Reg
+from utils import InstructionCollection, imatch
+
+
+def i_write_vsp(state: VMState, inst: cs.CsInsn, offset: int, variant: int) -> bool:
+    return (inst.id in (cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX)
+            if variant == 1 else inst.id == cs_x86.X86_INS_MOV) and \
+           inst.operands[0].type == cs.CS_OP_MEM and \
+           inst.operands[0].mem.base == state.vsp_reg.capstone and \
+           inst.operands[0].mem.index == cs_x86.X86_REG_INVALID and \
+           inst.operands[0].mem.disp == offset
+
+
+def i_read_vsp(state: VMState, inst: cs.CsInsn, offset: int, variant: int) -> bool:
+    return (inst.id in (cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX)
+            if variant == 1 else inst.id == cs_x86.X86_INS_MOV) and \
+           inst.operands[1].type == cs.CS_OP_MEM and \
+           inst.operands[1].mem.base == state.vsp_reg.capstone and \
+           inst.operands[1].mem.index == cs_x86.X86_REG_INVALID and \
+           inst.operands[1].mem.disp == offset
+
+
+def i_ref_vsp(state: VMState, inst: cs.CsInsn, offset: int = 0) -> bool:
+    if not offset and \
+            inst.id == cs_x86.X86_INS_MOV and \
+            inst.operands[1].type == cs.x86.X86_OP_REG and \
+            inst.operands[1].reg == state.vsp_reg.capstone:
+        return True
+
+    return inst.id == cs_x86.X86_INS_LEA and \
+        inst.operands[1].type == cs.CS_OP_MEM and \
+        inst.operands[1].mem.base == state.vsp_reg.capstone and \
+        inst.operands[1].mem.index == cs_x86.X86_REG_INVALID and \
+        inst.operands[1].mem.disp == offset
+
+
+def i_shift_vsp(state: VMState, inst: cs.CsInsn, offset: int) -> bool:
+    if abs(offset) & 1:
+        return False
+
+    if offset > 0:
+        return inst.id == cs_x86.X86_INS_ADD and \
+               inst.operands[0].type == cs.x86.X86_OP_REG and \
+               inst.operands[0].reg == state.vsp_reg.capstone and \
+               inst.operands[1].type == cs.x86.X86_OP_IMM and \
+               inst.operands[1].imm == offset
+    else:
+        return inst.id == cs_x86.X86_INS_SUB and \
+               inst.operands[0].type == cs.x86.X86_OP_REG and \
+               inst.operands[0].reg == state.vsp_reg.capstone and \
+               inst.operands[1].type == cs.x86.X86_OP_IMM and \
+               inst.operands[1].imm == -offset
+
+
+def i_load_const(state: VMState, inst: cs.CsInsn) -> bool:
+    return imatch(inst, [cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVABS], cs.CS_OP_REG, cs.CS_OP_IMM)
+
+
+def i_write_ctx(state: VMState, inst: cs.CsInsn, variant: int, disp: int = 0) -> bool:
+    return (inst.id in (cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX)
+            if variant == 1 else inst.id == cs_x86.X86_INS_MOV) and \
+           inst.operands[0].type == cs.CS_OP_MEM and \
+           inst.operands[0].mem.base == cs_x86.X86_REG_RSP and \
+           inst.operands[0].mem.index != cs_x86.X86_REG_INVALID and \
+           inst.operands[0].mem.scale == 1 and \
+           inst.operands[0].mem.disp == disp and \
+           (inst.operands[1].size <= 2 if variant == 1 else inst.operands[1].size == variant)
+
+
+def i_read_ctx(state: VMState, inst: cs.CsInsn, variant: int, disp: int = 0) -> bool:
+    return (inst.id in (cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX)
+            if variant == 1 else inst.id == cs_x86.X86_INS_MOV) and \
+           inst.operands[1].type == cs.CS_OP_MEM and \
+           inst.operands[1].mem.base == cs_x86.X86_REG_RSP and \
+           inst.operands[1].mem.index != cs_x86.X86_REG_INVALID and \
+           inst.operands[1].mem.scale == 1 and \
+           inst.operands[1].mem.disp == disp and \
+           (inst.operands[1].size <= 2 if variant == 1 else inst.operands[1].size == variant)
+
+
+def i_save_vsp_flags(state: VMState, inst0: cs.CsInsn, inst1: cs.CsInsn, offset: int = 0) -> bool:
+    return inst0.id == cs_x86.X86_INS_PUSHFQ and \
+           inst1.id == cs_x86.X86_INS_POP and \
+           inst1.operands[0].type == cs.CS_OP_MEM and \
+           inst1.operands[0].mem.base == state.vsp_reg.capstone and \
+           inst1.operands[0].mem.index == cs_x86.X86_REG_INVALID and \
+           inst1.operands[0].mem.disp == offset
 
 
 class VMOpcodeDescriptor:
@@ -47,91 +131,6 @@ class VMOpcodeDescriptor:
         v_inst.op = identifier
         self.adjust_matching(state, v_inst, variants)
 
-    @classmethod
-    def i_write_vsp(cls, state: VMState, inst: cs.CsInsn, offset: int, variant: int) -> bool:
-        return (inst.id in (cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX)
-                if variant == 1 else inst.id == cs_x86.X86_INS_MOV) and \
-               inst.operands[0].type == cs.CS_OP_MEM and \
-               inst.operands[0].mem.base == state.vsp_reg.capstone and \
-               inst.operands[0].mem.index == cs_x86.X86_REG_INVALID and \
-               inst.operands[0].mem.disp == offset
-
-    @classmethod
-    def i_read_vsp(cls, state: VMState, inst: cs.CsInsn, offset: int, variant: int) -> bool:
-        return (inst.id in (cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX)
-                if variant == 1 else inst.id == cs_x86.X86_INS_MOV) and \
-               inst.operands[1].type == cs.CS_OP_MEM and \
-               inst.operands[1].mem.base == state.vsp_reg.capstone and \
-               inst.operands[1].mem.index == cs_x86.X86_REG_INVALID and \
-               inst.operands[1].mem.disp == offset
-
-    @classmethod
-    def i_ref_vsp(cls, state: VMState, inst: cs.CsInsn, offset: int = 0) -> bool:
-        if not offset and \
-                inst.id == cs_x86.X86_INS_MOV and \
-                inst.operands[1].type == cs.x86.X86_OP_REG and \
-                inst.operands[1].reg == state.vsp_reg.capstone:
-            return True
-
-        return inst.id == cs_x86.X86_INS_LEA and \
-               inst.operands[1].type == cs.CS_OP_MEM and \
-               inst.operands[1].mem.base == state.vsp_reg.capstone and \
-               inst.operands[1].mem.index == cs_x86.X86_REG_INVALID and \
-               inst.operands[1].mem.disp == offset
-
-    @classmethod
-    def i_shift_vsp(cls, state: VMState, inst: cs.CsInsn, offset: int) -> bool:
-        if abs(offset) & 1:
-            return False
-
-        if offset > 0:
-            return inst.id == cs_x86.X86_INS_ADD and \
-                   inst.operands[0].type == cs.x86.X86_OP_REG and \
-                   inst.operands[0].reg == state.vsp_reg.capstone and \
-                   inst.operands[1].type == cs.x86.X86_OP_IMM and \
-                   inst.operands[1].imm == offset
-        else:
-            return inst.id == cs_x86.X86_INS_SUB and \
-                   inst.operands[0].type == cs.x86.X86_OP_REG and \
-                   inst.operands[0].reg == state.vsp_reg.capstone and \
-                   inst.operands[1].type == cs.x86.X86_OP_IMM and \
-                   inst.operands[1].imm == -offset
-
-    @classmethod
-    def i_loadc(cls, state: VMState, inst: cs.CsInsn) -> bool:
-        return imatch(inst, [cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVABS], cs.CS_OP_REG, cs.CS_OP_IMM)
-
-    @classmethod
-    def i_write_ctx(cls, state: VMState, inst: cs.CsInsn, variant: int, disp: int = 0) -> bool:
-        return (inst.id in (cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX)
-                if variant == 1 else inst.id == cs_x86.X86_INS_MOV) and \
-               inst.operands[0].type == cs.CS_OP_MEM and \
-               inst.operands[0].mem.base == cs_x86.X86_REG_RSP and \
-               inst.operands[0].mem.index != cs_x86.X86_REG_INVALID and \
-               inst.operands[0].mem.scale == 1 and \
-               inst.operands[0].mem.disp == disp and \
-               (inst.operands[1].size <= 2 if variant == 1 else inst.operands[1].size == variant)
-
-    @classmethod
-    def i_read_ctx(cls, state: VMState, inst: cs.CsInsn, variant: int, disp: int = 0) -> bool:
-        return (inst.id in (cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX)
-                if variant == 1 else inst.id == cs_x86.X86_INS_MOV) and \
-               inst.operands[1].type == cs.CS_OP_MEM and \
-               inst.operands[1].mem.base == cs_x86.X86_REG_RSP and \
-               inst.operands[1].mem.index != cs_x86.X86_REG_INVALID and \
-               inst.operands[1].mem.scale == 1 and \
-               inst.operands[1].mem.disp == disp and \
-               (inst.operands[1].size <= 2 if variant == 1 else inst.operands[1].size == variant)
-
-    @classmethod
-    def i_save_vsp_flags(cls, state: VMState, inst0: cs.CsInsn, inst1: cs.CsInsn, offset: int = 0) -> bool:
-        return inst0.id == cs_x86.X86_INS_PUSHFQ and \
-               inst1.id == cs_x86.X86_INS_POP and \
-               inst1.operands[0].type == cs.CS_OP_MEM and \
-               inst1.operands[0].mem.base == state.vsp_reg.capstone and \
-               inst1.operands[0].mem.index == cs_x86.X86_REG_INVALID and \
-               inst1.operands[0].mem.disp == offset
-
 
 class VUNKDescriptor(VMOpcodeDescriptor):
     """
@@ -171,22 +170,21 @@ class VPOPVDescriptor(VMOpcodeDescriptor):
 
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic  # type: InstructionCollection
-        ps = v_inst.parameter_sizes
         sz = 2 if var[0] == 1 else var[0]
 
         matched = len(ic) == 4 and \
-                  self.i_read_vsp(state, ic[0], 0, var[0]) and \
-                  self.i_shift_vsp(state, ic[1], sz) and \
-                  self.i_loadc(state, ic[2]) and \
-                  self.i_write_ctx(state, ic[3], var[0])
+            i_read_vsp(state, ic[0], 0, var[0]) and \
+            i_shift_vsp(state, ic[1], sz) and \
+            i_load_const(state, ic[2]) and \
+            i_write_ctx(state, ic[3], var[0])
         if matched:
             return True
 
         matched = len(ic) == 4 and \
-                  self.i_loadc(state, ic[0]) and \
-                  self.i_read_vsp(state, ic[1], 0, var[0]) and \
-                  self.i_shift_vsp(state, ic[2], sz) and \
-                  self.i_write_ctx(state, ic[3], var[0])
+            i_load_const(state, ic[0]) and \
+            i_read_vsp(state, ic[1], 0, var[0]) and \
+            i_shift_vsp(state, ic[2], sz) and \
+            i_write_ctx(state, ic[3], var[0])
 
         return matched
 
@@ -209,7 +207,7 @@ class VPOPDDescriptor(VMOpcodeDescriptor):
 
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
-        return len(ic) == 1 and self.i_shift_vsp(state, ic[0], +var[0])
+        return len(ic) == 1 and i_shift_vsp(state, ic[0], +var[0])
 
 
 class VPUSHCDescriptor(VMOpcodeDescriptor):
@@ -233,9 +231,9 @@ class VPUSHCDescriptor(VMOpcodeDescriptor):
         ic = v_inst.ic
         sz = 2 if var[0] == 1 else var[0]
         return len(ic) == 3 and \
-               self.i_loadc(state, ic[0]) and \
-               self.i_shift_vsp(state, ic[1], -sz) and \
-               self.i_write_vsp(state, ic[2], 0, var[0])
+            i_load_const(state, ic[0]) and \
+            i_shift_vsp(state, ic[1], -sz) and \
+            i_write_vsp(state, ic[2], 0, var[0])
 
 
 class VPUSHVDescriptor(VMOpcodeDescriptor):
@@ -260,10 +258,10 @@ class VPUSHVDescriptor(VMOpcodeDescriptor):
         ic = v_inst.ic
         sz = 2 if var[0] == 1 else var[0]
         return len(ic) == 4 and \
-               self.i_loadc(state, ic[0]) and \
-               self.i_read_ctx(state, ic[1], var[0]) and \
-               self.i_shift_vsp(state, ic[2], -sz) and \
-               self.i_write_vsp(state, ic[3], 0, var[0])
+            i_load_const(state, ic[0]) and \
+            i_read_ctx(state, ic[1], var[0]) and \
+            i_shift_vsp(state, ic[2], -sz) and \
+            i_write_vsp(state, ic[3], 0, var[0])
 
 
 class VPUSHRDescriptor(VMOpcodeDescriptor):
@@ -287,9 +285,9 @@ class VPUSHRDescriptor(VMOpcodeDescriptor):
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
         return len(ic) == 3 and \
-               self.i_ref_vsp(state, ic[0], 0) and \
-               self.i_shift_vsp(state, ic[1], -var[0]) and \
-               self.i_write_vsp(state, ic[2], 0, var[0])
+            i_ref_vsp(state, ic[0], 0) and \
+            i_shift_vsp(state, ic[1], -var[0]) and \
+            i_write_vsp(state, ic[2], 0, var[0])
 
 
 class VADDUDescriptor(VMOpcodeDescriptor):
@@ -320,12 +318,12 @@ class VADDUDescriptor(VMOpcodeDescriptor):
         sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == (6 + dt) and \
-               self.i_read_vsp(state, ic[0], 0, var[0]) and \
-               self.i_read_vsp(state, ic[1], sz, var[0]) and \
-               (dt == 0 or self.i_shift_vsp(state, ic[2], sz - 8)) and \
-               ic[2 + dt].id == cs_x86.X86_INS_ADD and \
-               self.i_write_vsp(state, ic[3 + dt], 8, var[0]) and \
-               self.i_save_vsp_flags(state, ic[4 + dt], ic[5 + dt])
+            i_read_vsp(state, ic[0], 0, var[0]) and \
+            i_read_vsp(state, ic[1], sz, var[0]) and \
+            (dt == 0 or i_shift_vsp(state, ic[2], sz - 8)) and \
+            ic[2 + dt].id == cs_x86.X86_INS_ADD and \
+            i_write_vsp(state, ic[3 + dt], 8, var[0]) and \
+            i_save_vsp_flags(state, ic[4 + dt], ic[5 + dt])
 
 
 class VIMULUDescriptor(VMOpcodeDescriptor):
@@ -354,18 +352,18 @@ class VIMULUDescriptor(VMOpcodeDescriptor):
         ic = v_inst.ic
         sz = 2 if var[0] == 1 else var[0]
         return len(ic) == 8 and \
-               self.i_read_vsp(state, ic[0], sz, var[0]) and \
-               X86Reg.RAX.is_equal_to_capstone(ic[0].operands[0].reg) and \
-               self.i_read_vsp(state, ic[1], 0, var[0]) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[1].operands[0].reg) and \
-               self.i_shift_vsp(state, ic[2], sz - 8) and \
-               imatch(ic[3], cs_x86.X86_INS_IMUL, cs.CS_OP_REG) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[3].operands[0].reg) and \
-               self.i_write_vsp(state, ic[4], +8, var[0]) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[4].operands[1].reg) and \
-               self.i_write_vsp(state, ic[5], +8 + sz, var[0]) and \
-               X86Reg.RAX.is_equal_to_capstone(ic[5].operands[1].reg) and \
-               self.i_save_vsp_flags(state, ic[6], ic[7])
+            i_read_vsp(state, ic[0], sz, var[0]) and \
+            X86Reg.RAX.is_equal_to_capstone(ic[0].operands[0].reg) and \
+            i_read_vsp(state, ic[1], 0, var[0]) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[1].operands[0].reg) and \
+            i_shift_vsp(state, ic[2], sz - 8) and \
+            imatch(ic[3], cs_x86.X86_INS_IMUL, cs.CS_OP_REG) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[3].operands[0].reg) and \
+            i_write_vsp(state, ic[4], +8, var[0]) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[4].operands[1].reg) and \
+            i_write_vsp(state, ic[5], +8 + sz, var[0]) and \
+            X86Reg.RAX.is_equal_to_capstone(ic[5].operands[1].reg) and \
+            i_save_vsp_flags(state, ic[6], ic[7])
 
 
 class VIDIVUDescriptor(VMOpcodeDescriptor):
@@ -395,18 +393,18 @@ class VIDIVUDescriptor(VMOpcodeDescriptor):
         dt = 0 if var[0] == 8 else 1
         sz = 2 if var[0] == 1 else var[0]
         return len(ic) == (8 + dt) and \
-               self.i_read_vsp(state, ic[0], sz, var[0]) and \
-               X86Reg.RAX.is_equal_to_capstone(ic[0].operands[0].reg) and \
-               self.i_read_vsp(state, ic[1], 0, var[0]) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[1].operands[0].reg) and \
-               self.i_read_vsp(state, ic[2], sz * 2, var[0]) and \
-               (not dt or self.i_shift_vsp(state, ic[3], sz - 8)) and \
-               imatch(ic[3 + dt], cs_x86.X86_INS_IDIV, cs.CS_OP_REG) and \
-               self.i_write_vsp(state, ic[4 + dt], +8, var[0]) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[4 + dt].operands[1].reg) and \
-               self.i_write_vsp(state, ic[5 + dt], +8 + sz, var[0]) and \
-               X86Reg.RAX.is_equal_to_capstone(ic[5 + dt].operands[1].reg) and \
-               self.i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
+            i_read_vsp(state, ic[0], sz, var[0]) and \
+            X86Reg.RAX.is_equal_to_capstone(ic[0].operands[0].reg) and \
+            i_read_vsp(state, ic[1], 0, var[0]) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[1].operands[0].reg) and \
+            i_read_vsp(state, ic[2], sz * 2, var[0]) and \
+            (not dt or i_shift_vsp(state, ic[3], sz - 8)) and \
+            imatch(ic[3 + dt], cs_x86.X86_INS_IDIV, cs.CS_OP_REG) and \
+            i_write_vsp(state, ic[4 + dt], +8, var[0]) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[4 + dt].operands[1].reg) and \
+            i_write_vsp(state, ic[5 + dt], +8 + sz, var[0]) and \
+            X86Reg.RAX.is_equal_to_capstone(ic[5 + dt].operands[1].reg) and \
+            i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
 
 
 class VMULUDescriptor(VMOpcodeDescriptor):
@@ -435,18 +433,18 @@ class VMULUDescriptor(VMOpcodeDescriptor):
         ic = v_inst.ic
         sz = 2 if var[0] == 1 else var[0]
         return len(ic) == 8 and \
-               self.i_read_vsp(state, ic[0], sz, var[0]) and \
-               X86Reg.RAX.is_equal_to_capstone(ic[0].operands[0].reg) and \
-               self.i_read_vsp(state, ic[1], 0, var[0]) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[1].operands[0].reg) and \
-               self.i_shift_vsp(state, ic[2], sz - 8) and \
-               imatch(ic[3], cs_x86.X86_INS_MUL, cs.CS_OP_REG) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[3].operands[0].reg) and \
-               self.i_write_vsp(state, ic[4], +8, var[0]) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[4].operands[1].reg) and \
-               self.i_write_vsp(state, ic[5], +8 + sz, var[0]) and \
-               X86Reg.RAX.is_equal_to_capstone(ic[5].operands[1].reg) and \
-               self.i_save_vsp_flags(state, ic[6], ic[7])
+            i_read_vsp(state, ic[0], sz, var[0]) and \
+            X86Reg.RAX.is_equal_to_capstone(ic[0].operands[0].reg) and \
+            i_read_vsp(state, ic[1], 0, var[0]) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[1].operands[0].reg) and \
+            i_shift_vsp(state, ic[2], sz - 8) and \
+            imatch(ic[3], cs_x86.X86_INS_MUL, cs.CS_OP_REG) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[3].operands[0].reg) and \
+            i_write_vsp(state, ic[4], +8, var[0]) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[4].operands[1].reg) and \
+            i_write_vsp(state, ic[5], +8 + sz, var[0]) and \
+            X86Reg.RAX.is_equal_to_capstone(ic[5].operands[1].reg) and \
+            i_save_vsp_flags(state, ic[6], ic[7])
 
 
 class VDIVUDescriptor(VMOpcodeDescriptor):
@@ -476,18 +474,18 @@ class VDIVUDescriptor(VMOpcodeDescriptor):
         dt = 0 if var[0] == 8 else 1
         sz = 2 if var[0] == 1 else var[0]
         return len(ic) == (8 + dt) and \
-               self.i_read_vsp(state, ic[0], sz, var[0]) and \
-               X86Reg.RAX.is_equal_to_capstone(ic[0].operands[0].reg) and \
-               self.i_read_vsp(state, ic[1], 0, var[0]) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[1].operands[0].reg) and \
-               self.i_read_vsp(state, ic[2], sz * 2, var[0]) and \
-               (not dt or self.i_shift_vsp(state, ic[3], sz - 8)) and \
-               imatch(ic[3 + dt], cs_x86.X86_INS_DIV, cs.CS_OP_REG) and \
-               self.i_write_vsp(state, ic[4 + dt], +8, var[0]) and \
-               X86Reg.RDX.is_equal_to_capstone(ic[4 + dt].operands[1].reg) and \
-               self.i_write_vsp(state, ic[5 + dt], +8 + sz, var[0]) and \
-               X86Reg.RAX.is_equal_to_capstone(ic[5 + dt].operands[1].reg) and \
-               self.i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
+            i_read_vsp(state, ic[0], sz, var[0]) and \
+            X86Reg.RAX.is_equal_to_capstone(ic[0].operands[0].reg) and \
+            i_read_vsp(state, ic[1], 0, var[0]) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[1].operands[0].reg) and \
+            i_read_vsp(state, ic[2], sz * 2, var[0]) and \
+            (not dt or i_shift_vsp(state, ic[3], sz - 8)) and \
+            imatch(ic[3 + dt], cs_x86.X86_INS_DIV, cs.CS_OP_REG) and \
+            i_write_vsp(state, ic[4 + dt], +8, var[0]) and \
+            X86Reg.RDX.is_equal_to_capstone(ic[4 + dt].operands[1].reg) and \
+            i_write_vsp(state, ic[5 + dt], +8 + sz, var[0]) and \
+            X86Reg.RAX.is_equal_to_capstone(ic[5 + dt].operands[1].reg) and \
+            i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
 
 
 class VNORUDescriptor(VMOpcodeDescriptor):
@@ -519,14 +517,14 @@ class VNORUDescriptor(VMOpcodeDescriptor):
         sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == (8 + dt) and \
-               self.i_read_vsp(state, ic[0], 0, var[0]) and \
-               self.i_read_vsp(state, ic[1], sz, var[0]) and \
-               (dt == 0 or self.i_shift_vsp(state, ic[2], sz - 8)) and \
-               ic[2 + dt].id == cs_x86.X86_INS_NOT and \
-               ic[3 + dt].id == cs_x86.X86_INS_NOT and \
-               ic[4 + dt].id == cs_x86.X86_INS_AND and \
-               self.i_write_vsp(state, ic[5 + dt], +8, var[0]) and \
-               self.i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
+            i_read_vsp(state, ic[0], 0, var[0]) and \
+            i_read_vsp(state, ic[1], sz, var[0]) and \
+            (dt == 0 or i_shift_vsp(state, ic[2], sz - 8)) and \
+            ic[2 + dt].id == cs_x86.X86_INS_NOT and \
+            ic[3 + dt].id == cs_x86.X86_INS_NOT and \
+            ic[4 + dt].id == cs_x86.X86_INS_AND and \
+            i_write_vsp(state, ic[5 + dt], +8, var[0]) and \
+            i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
 
 
 class VNANDUDescriptor(VMOpcodeDescriptor):
@@ -558,14 +556,14 @@ class VNANDUDescriptor(VMOpcodeDescriptor):
         sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == (8 + dt) and \
-               self.i_read_vsp(state, ic[0], 0, var[0]) and \
-               self.i_read_vsp(state, ic[1], sz, var[0]) and \
-               (dt == 0 or self.i_shift_vsp(state, ic[2], sz - 8)) and \
-               ic[2 + dt].id == cs_x86.X86_INS_NOT and \
-               ic[3 + dt].id == cs_x86.X86_INS_NOT and \
-               ic[4 + dt].id == cs_x86.X86_INS_OR and \
-               self.i_write_vsp(state, ic[5 + dt], +8, var[0]) and \
-               self.i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
+            i_read_vsp(state, ic[0], 0, var[0]) and \
+            i_read_vsp(state, ic[1], sz, var[0]) and \
+            (dt == 0 or i_shift_vsp(state, ic[2], sz - 8)) and \
+            ic[2 + dt].id == cs_x86.X86_INS_NOT and \
+            ic[3 + dt].id == cs_x86.X86_INS_NOT and \
+            ic[4 + dt].id == cs_x86.X86_INS_OR and \
+            i_write_vsp(state, ic[5 + dt], +8, var[0]) and \
+            i_save_vsp_flags(state, ic[6 + dt], ic[7 + dt])
 
 
 class VSHRUDescriptor(VMOpcodeDescriptor):
@@ -594,12 +592,12 @@ class VSHRUDescriptor(VMOpcodeDescriptor):
         sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == 7 and \
-               self.i_read_vsp(state, ic[0], 0, var[0]) and \
-               self.i_read_vsp(state, ic[1], sz, 2) and \
-               self.i_shift_vsp(state, ic[2], -6) and \
-               ic[3].id == cs_x86.X86_INS_SHR and \
-               self.i_write_vsp(state, ic[4], +8, var[0]) and \
-               self.i_save_vsp_flags(state, ic[5], ic[6])
+            i_read_vsp(state, ic[0], 0, var[0]) and \
+            i_read_vsp(state, ic[1], sz, 2) and \
+            i_shift_vsp(state, ic[2], -6) and \
+            ic[3].id == cs_x86.X86_INS_SHR and \
+            i_write_vsp(state, ic[4], +8, var[0]) and \
+            i_save_vsp_flags(state, ic[5], ic[6])
 
 
 class VSHLUDescriptor(VMOpcodeDescriptor):
@@ -628,12 +626,12 @@ class VSHLUDescriptor(VMOpcodeDescriptor):
         sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == 7 and \
-               self.i_read_vsp(state, ic[0], 0, var[0]) and \
-               self.i_read_vsp(state, ic[1], sz, 2) and \
-               self.i_shift_vsp(state, ic[2], -6) and \
-               ic[3].id == cs_x86.X86_INS_SHL and \
-               self.i_write_vsp(state, ic[4], +8, var[0]) and \
-               self.i_save_vsp_flags(state, ic[5], ic[6])
+            i_read_vsp(state, ic[0], 0, var[0]) and \
+            i_read_vsp(state, ic[1], sz, 2) and \
+            i_shift_vsp(state, ic[2], -6) and \
+            ic[3].id == cs_x86.X86_INS_SHL and \
+            i_write_vsp(state, ic[4], +8, var[0]) and \
+            i_save_vsp_flags(state, ic[5], ic[6])
 
 
 class VSHRDUDescriptor(VMOpcodeDescriptor):
@@ -663,13 +661,13 @@ class VSHRDUDescriptor(VMOpcodeDescriptor):
         sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == 7 and \
-               self.i_read_vsp(state, ic[0], 0, var[0]) and \
-               self.i_read_vsp(state, ic[1], sz, var[0]) and \
-               self.i_read_vsp(state, ic[2], sz * 2, 2) and \
-               self.i_shift_vsp(state, ic[3], sz - 6) and \
-               ic[4].id == cs_x86.X86_INS_SHRD and \
-               self.i_write_vsp(state, ic[5], +8, var[0]) and \
-               self.i_save_vsp_flags(state, ic[6], ic[7])
+            i_read_vsp(state, ic[0], 0, var[0]) and \
+            i_read_vsp(state, ic[1], sz, var[0]) and \
+            i_read_vsp(state, ic[2], sz * 2, 2) and \
+            i_shift_vsp(state, ic[3], sz - 6) and \
+            ic[4].id == cs_x86.X86_INS_SHRD and \
+            i_write_vsp(state, ic[5], +8, var[0]) and \
+            i_save_vsp_flags(state, ic[6], ic[7])
 
 
 class VSHLDUDescriptor(VMOpcodeDescriptor):
@@ -699,13 +697,13 @@ class VSHLDUDescriptor(VMOpcodeDescriptor):
         sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == 7 and \
-               self.i_read_vsp(state, ic[0], 0, var[0]) and \
-               self.i_read_vsp(state, ic[1], sz, var[0]) and \
-               self.i_read_vsp(state, ic[2], sz * 2, 2) and \
-               self.i_shift_vsp(state, ic[3], sz - 6) and \
-               ic[4].id == cs_x86.X86_INS_SHLD and \
-               self.i_write_vsp(state, ic[5], +8, var[0]) and \
-               self.i_save_vsp_flags(state, ic[6], ic[7])
+            i_read_vsp(state, ic[0], 0, var[0]) and \
+            i_read_vsp(state, ic[1], sz, var[0]) and \
+            i_read_vsp(state, ic[2], sz * 2, 2) and \
+            i_shift_vsp(state, ic[3], sz - 6) and \
+            ic[4].id == cs_x86.X86_INS_SHLD and \
+            i_write_vsp(state, ic[5], +8, var[0]) and \
+            i_save_vsp_flags(state, ic[6], ic[7])
 
 
 class VREADUDescriptor(VMOpcodeDescriptor):
@@ -731,14 +729,14 @@ class VREADUDescriptor(VMOpcodeDescriptor):
         sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == (3 + dt) and \
-               self.i_read_vsp(state, ic[0], 0, 8) and \
-               ic[1].id in [cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX] and \
-               ic[1].operands[1].type == cs_x86.X86_OP_MEM and \
-               ic[1].operands[1].mem.index == cs_x86.X86_REG_INVALID and \
-               ic[1].operands[1].mem.disp == 0 and \
-               ic[1].operands[1].size == var[0] and \
-               (dt == 0 or self.i_shift_vsp(state, ic[2], 8 - sz)) and \
-               self.i_write_vsp(state, ic[2 + dt], 0, var[0])
+            i_read_vsp(state, ic[0], 0, 8) and \
+            ic[1].id in [cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVZX] and \
+            ic[1].operands[1].type == cs_x86.X86_OP_MEM and \
+            ic[1].operands[1].mem.index == cs_x86.X86_REG_INVALID and \
+            ic[1].operands[1].mem.disp == 0 and \
+            ic[1].operands[1].size == var[0] and \
+            (dt == 0 or i_shift_vsp(state, ic[2], 8 - sz)) and \
+            i_write_vsp(state, ic[2 + dt], 0, var[0])
 
 
 class VWRITEUDescriptor(VMOpcodeDescriptor):
@@ -761,16 +759,15 @@ class VWRITEUDescriptor(VMOpcodeDescriptor):
 
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
-        sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == 4 and \
-               self.i_read_vsp(state, ic[0], 0, 8) and \
-               self.i_read_vsp(state, ic[1], 8, var[0]) and \
-               self.i_shift_vsp(state, ic[2], 8 + var[0]) and \
-               ic[3].id == cs_x86.X86_INS_MOV and \
-               ic[3].operands[0].type == cs_x86.X86_OP_MEM and \
-               ic[3].operands[0].mem.index == cs_x86.X86_REG_INVALID and \
-               ic[3].operands[0].mem.disp == 0
+            i_read_vsp(state, ic[0], 0, 8) and \
+            i_read_vsp(state, ic[1], 8, var[0]) and \
+            i_shift_vsp(state, ic[2], 8 + var[0]) and \
+            ic[3].id == cs_x86.X86_INS_MOV and \
+            ic[3].operands[0].type == cs_x86.X86_OP_MEM and \
+            ic[3].operands[0].mem.index == cs_x86.X86_REG_INVALID and \
+            ic[3].operands[0].mem.disp == 0
 
 
 class VLOCKXCHGUDescriptor(VMOpcodeDescriptor):
@@ -795,14 +792,13 @@ class VLOCKXCHGUDescriptor(VMOpcodeDescriptor):
 
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
-        sz = 2 if var[0] == 1 else var[0]
 
         return len(ic) == 5 and \
-               self.i_read_vsp(state, ic[0], 0, 8) and \
-               self.i_read_vsp(state, ic[1], 8, var[0]) and \
-               self.i_shift_vsp(state, ic[2], 8) and \
-               ic[3].id == cs_x86.X86_INS_XCHG and \
-               self.i_write_vsp(state, ic[4], 0, var[0])
+            i_read_vsp(state, ic[0], 0, 8) and \
+            i_read_vsp(state, ic[1], 8, var[0]) and \
+            i_shift_vsp(state, ic[2], 8) and \
+            ic[3].id == cs_x86.X86_INS_XCHG and \
+            i_write_vsp(state, ic[4], 0, var[0])
 
 
 class VCUPIDDescriptor(VMOpcodeDescriptor):
@@ -831,13 +827,13 @@ class VCUPIDDescriptor(VMOpcodeDescriptor):
         ic = v_inst.ic
 
         return len(ic) == 7 and \
-               self.i_read_vsp(state, ic[0], 0, 4) and \
-               ic[1].id == cs_x86.X86_INS_CPUID and \
-               self.i_shift_vsp(state, ic[2], -0xC) and \
-               self.i_write_vsp(state, ic[3], 0xC, 4) and \
-               self.i_write_vsp(state, ic[4], 0x8, 4) and \
-               self.i_write_vsp(state, ic[5], 0x4, 4) and \
-               self.i_write_vsp(state, ic[6], 0x0, 4)
+            i_read_vsp(state, ic[0], 0, 4) and \
+            ic[1].id == cs_x86.X86_INS_CPUID and \
+            i_shift_vsp(state, ic[2], -0xC) and \
+            i_write_vsp(state, ic[3], 0xC, 4) and \
+            i_write_vsp(state, ic[4], 0x8, 4) and \
+            i_write_vsp(state, ic[5], 0x4, 4) and \
+            i_write_vsp(state, ic[6], 0x0, 4)
 
 
 class VCUPIDXDescriptor(VMOpcodeDescriptor):
@@ -865,8 +861,8 @@ class VCUPIDXDescriptor(VMOpcodeDescriptor):
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
         return len(ic) == 9 and \
-               self.i_read_vsp(state, ic[0], 0, 4) and \
-               ic[1].id == cs_x86.X86_INS_CPUID
+            i_read_vsp(state, ic[0], 0, 4) and \
+            ic[1].id == cs_x86.X86_INS_CPUID
 
     def adjust_matching(self, state: VMState, v_inst: VMInstruction, variants: list):
         v_inst.stack_delta = -0xC
@@ -894,10 +890,10 @@ class VRDTSCDescriptor(VMOpcodeDescriptor):
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
         return len(ic) == 4 and \
-               ic[0].id == cs_x86.X86_INS_RDTSC and \
-               self.i_shift_vsp(state, ic[1], -0x8) and \
-               self.i_write_vsp(state, ic[2], 0, 4) and \
-               self.i_write_vsp(state, ic[3], 4, 4)
+            ic[0].id == cs_x86.X86_INS_RDTSC and \
+            i_shift_vsp(state, ic[1], -0x8) and \
+            i_write_vsp(state, ic[2], 0, 4) and \
+            i_write_vsp(state, ic[3], 4, 4)
 
 
 class VSETVSPDescriptor(VMOpcodeDescriptor):
@@ -920,9 +916,9 @@ class VSETVSPDescriptor(VMOpcodeDescriptor):
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
         return len(ic) == 1 and \
-               self.i_read_vsp(state, ic[0], 0, 8) and \
-               ic[0].operands[0].type == cs.CS_OP_REG and \
-               ic[0].operands[0].reg == state.vsp_reg.capstone
+            i_read_vsp(state, ic[0], 0, 8) and \
+            ic[0].operands[0].type == cs.CS_OP_REG and \
+            ic[0].operands[0].reg == state.vsp_reg.capstone
 
 
 class VJMPDescriptor(VMOpcodeDescriptor):
@@ -983,7 +979,7 @@ class VNOPDescriptor(VMOpcodeDescriptor):
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
         return len(ic) == 1 and \
-               ic[0].id == cs_x86.X86_INS_LEA
+            ic[0].id == cs_x86.X86_INS_LEA
 
 
 class VPUSHCR0Descriptor(VMOpcodeDescriptor):
@@ -1007,10 +1003,10 @@ class VPUSHCR0Descriptor(VMOpcodeDescriptor):
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
         return len(ic) == 3 and \
-               ic[0].id == cs_x86.X86_INS_MOV and \
-               ic[0].operands[1].reg == cs_x86.X86_REG_CR0 and \
-               self.i_shift_vsp(state, ic[1], -0x8) and \
-               self.i_write_vsp(state, ic[2], 0, 8)
+            ic[0].id == cs_x86.X86_INS_MOV and \
+            ic[0].operands[1].reg == cs_x86.X86_REG_CR0 and \
+            i_shift_vsp(state, ic[1], -0x8) and \
+            i_write_vsp(state, ic[2], 0, 8)
 
 
 class VPUSHCR3Descriptor(VMOpcodeDescriptor):
@@ -1021,10 +1017,10 @@ class VPUSHCR3Descriptor(VMOpcodeDescriptor):
     def match(self, state: VMState, v_inst: VMInstruction, var: []) -> bool:
         ic = v_inst.ic
         return len(ic) == 3 and \
-               ic[0].id == cs_x86.X86_INS_MOV and \
-               ic[0].operands[1].reg == cs_x86.X86_REG_CR3 and \
-               self.i_shift_vsp(state, ic[1], -0x8) and \
-               self.i_write_vsp(state, ic[2], 0, 8)
+            ic[0].id == cs_x86.X86_INS_MOV and \
+            ic[0].operands[1].reg == cs_x86.X86_REG_CR3 and \
+            i_shift_vsp(state, ic[1], -0x8) and \
+            i_write_vsp(state, ic[2], 0, 8)
 
 
 class VMInstructions:

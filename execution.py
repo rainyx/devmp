@@ -1,3 +1,5 @@
+from typing import NoReturn, Optional
+
 import z3
 import unicorn as uc
 import unicorn.x86_const as uc_x86
@@ -20,7 +22,7 @@ class VMSymbolicExecutor:
             self._val_imms = val_imms
 
         @classmethod
-        def get_all_constants(cls, expr, out: set):
+        def get_all_constants(cls, expr, out: set) -> [z3.BitVecRef]:
             if z3.is_const(expr):
                 out.add(expr)
             for idx in range(expr.num_args()):
@@ -33,7 +35,7 @@ class VMSymbolicExecutor:
         def get_symbolic_memory(self, address: int) -> z3.BitVecRef:
             return self._mem_vals[address]
 
-        def substitute_all_constants(self, expr: z3.ExprRef):
+        def substitute_all_constants(self, expr: z3.ExprRef) -> z3.ExprRef:
             constants = set()
             self.get_all_constants(expr, constants)
             for c in constants:
@@ -60,7 +62,7 @@ class VMSymbolicExecutor:
         self._val_imms = {}  # type: {z3.BitVecRef: int}
 
     @staticmethod
-    def _cast_bv(bv, sz: int):
+    def _cast_bv(bv, sz: int) -> z3.BitVecRef:
         target_bv_sz = sz * 8
         if bv.size() < target_bv_sz:
             return z3.ZeroExt(target_bv_sz - bv.size(), bv)
@@ -70,38 +72,38 @@ class VMSymbolicExecutor:
             return bv
 
     @staticmethod
-    def _is_mov_reg_mem(i):
+    def _is_mov_reg_mem(i) -> bool:
         return imatch(i, cs_x86.X86_INS_MOV, cs.CS_OP_REG, cs.CS_OP_MEM)
 
     @staticmethod
-    def _is_mov_mem_reg(i):
+    def _is_mov_mem_reg(i) -> bool:
         return imatch(i, cs_x86.X86_INS_MOV, cs.CS_OP_MEM, cs.CS_OP_REG)
 
     @staticmethod
-    def _is_mov_reg_imm(i):
+    def _is_mov_reg_imm(i) -> bool:
         return imatch(i, [cs_x86.X86_INS_MOV, cs_x86.X86_INS_MOVABS], cs.CS_OP_REG, cs.CS_OP_IMM)
 
     @staticmethod
-    def _is_mov_reg_reg(i):
+    def _is_mov_reg_reg(i) -> bool:
         return imatch(i, cs_x86.X86_INS_MOV, cs.CS_OP_REG, cs.CS_OP_REG)
 
     @staticmethod
-    def _is_pop_mem(i):
+    def _is_pop_mem(i) -> bool:
         return imatch(i, cs_x86.X86_INS_POP, cs.CS_OP_MEM)
 
     @staticmethod
-    def _is_binary_reg_reg(i):
+    def _is_binary_reg_reg(i) -> bool:
         return imatch(i, [cs_x86.X86_INS_ADD, cs_x86.X86_INS_OR, cs_x86.X86_INS_AND,
                           cs_x86.X86_INS_XOR, cs_x86.X86_INS_SHR], cs.CS_OP_REG, cs.CS_OP_REG)
 
-    def _get_imm_value(self, imm: int, sz: int):
+    def _get_imm_value(self, imm: int, sz: int) -> z3.BitVecRef:
         if imm not in self._imm_vals:
             bv = z3.BitVec(f"imm_0x{imm:x}", sz * 8)
             self._imm_vals[imm] = bv
             self._val_imms[bv] = imm
         return self._cast_bv(self._imm_vals[imm], sz)
 
-    def _get_mem_address(self, mem: cs_x86.X86OpMem):
+    def _get_mem_address(self, mem: cs_x86.X86OpMem) -> int:
         address = 0
         if mem.base != cs_x86.X86_REG_INVALID:
             address = self.emulator.reg_read(mem.base)
@@ -110,38 +112,37 @@ class VMSymbolicExecutor:
         address += mem.disp
         return address
 
-    def _write_mem(self, mem: cs_x86.X86OpMem, bv):
+    def _write_mem(self, mem: cs_x86.X86OpMem, bv) -> NoReturn:
         address = self._get_mem_address(mem)
         self._mem_vals[address] = bv
 
-    def _read_mem_address(self, address: int, sz: int):
+    def _read_mem_address(self, address: int, sz: int) -> z3.BitVecRef:
         if address not in self._mem_vals:
             mem_bytes = self.emulator.mem_read(address, sz)
             val = unpack_int(mem_bytes, sz)
             self._mem_vals[address] = self._get_imm_value(val, sz)
         return self._cast_bv(self._mem_vals[address], sz)
 
-    def _read_mem(self, mem: cs_x86.X86OpMem, sz: int):
+    def _read_mem(self, mem: cs_x86.X86OpMem, sz: int) -> z3.BitVecRef:
         address = self._get_mem_address(mem)
         return self._read_mem_address(address, sz)
 
-    def _write_reg(self, reg: int, _bv):
+    def _write_reg(self, reg: int, _bv) -> NoReturn:
         u_reg = X86Reg.from_capstone(reg).extended
         self._reg_vals[u_reg] = _bv
 
-    def _read_reg(self, reg: int, sz: int):
+    def _read_reg(self, reg: int, sz: int) -> z3.BitVecRef:
         u_reg = X86Reg.from_capstone(reg).extended
         if u_reg not in self._reg_vals:
             val = self.emulator.reg_read(reg)
             self._reg_vals[u_reg] = self._get_imm_value(val, sz)
         return self._cast_bv(self._reg_vals[u_reg], sz)
 
-    def _read_rsp(self, sz: int):
+    def _read_rsp(self, sz: int) -> z3.BitVecRef:
         address = self.emulator.reg_read(uc_x86.UC_X86_REG_RSP)
         return self._read_mem_address(address, sz)
 
-    def _on_instruction(self, inst: cs.CsInsn):
-
+    def _on_instruction(self, inst: cs.CsInsn) -> NoReturn:
         if self._is_pop_mem(inst):
             self._write_mem(inst.operands[0].mem, self._read_rsp(inst.operands[0].size))
         elif self._is_mov_reg_mem(inst):
@@ -186,7 +187,7 @@ class VMSymbolicExecutor:
     def state(self) -> VMState:
         return self._state
 
-    def execute(self, insts: [cs.CsInsn]):
+    def execute(self, insts: [cs.CsInsn]) -> State:
         mu = self.emulator
 
         code_bytes = b"".join([i.bytes for i in insts])
@@ -214,7 +215,7 @@ class VMSymbolicExecutor:
 class VMBranchAnalyzer:
 
     @classmethod
-    def _find_condition(cls, expr: z3.ExprRef):
+    def _find_condition(cls, expr: z3.BitVecRef) -> Optional[z3.BitVecRef]:
         if expr.decl().kind() == z3.Z3_OP_BOR:
             return expr.arg(0)
         else:
@@ -222,9 +223,10 @@ class VMBranchAnalyzer:
                 cond = cls._find_condition(expr.arg(_idx))
                 if cond is not None:
                     return cond
+        return None
 
     @classmethod
-    def analyze(cls, state: VMState, bb: VMBasicBlock):
+    def analyze(cls, state: VMState, bb: VMBasicBlock) -> [int]:
         insts = bb.underlying_instructions
         insts.append(str_to_cs_inst(f"mov rax, [{state.vsp_reg.name}]"))
 

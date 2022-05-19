@@ -13,7 +13,7 @@ T = TypeVar('T')
 
 class LinkedList(Generic[T]):
     class Node:
-        def __init__(self, value:T):
+        def __init__(self, value: T):
             self._value = value
             self._next = None
             self._prev = None
@@ -23,7 +23,7 @@ class LinkedList(Generic[T]):
             return self._value
 
         @value.setter
-        def value(self, value:T):
+        def value(self, value: T):
             self._value = value
 
         @property
@@ -41,7 +41,7 @@ class LinkedList(Generic[T]):
         self._head = None
         self._tail = None
 
-    def append(self, value:T):
+    def append(self, value: T):
         node = self.Node(value)
         if self._head is None:
             self._head = node

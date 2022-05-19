@@ -1,3 +1,4 @@
+from typing import NoReturn, Optional
 import capstone as cs
 import capstone.x86 as cs_x86
 import unicorn as uc
@@ -392,7 +393,7 @@ class VMTracer:
         return val - image_base
 
 
-def update_vip_direction(state: VMState, cursor: int, ic: InstructionCollection):
+def update_vip_direction(state: VMState, cursor: int, ic: InstructionCollection) -> NoReturn:
     def _forward_finder(i):
         # ----------------------------------------------------
         # add vip_reg, imm
@@ -460,11 +461,11 @@ def _decrypt(state: VMState, decryption_block: VMDecryptionBlock) -> VMDecrypted
     return d_info
 
 
-def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollection):
+def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollection) -> Optional[VMDecryptionBlock]:
     if state.vip_direction == 0:
         raise Exception("vip direction is not determined")
 
-    def _def_finder(i):
+    def _def_finder(i) -> bool:
         if imatch(i, cs.x86.X86_INS_MOVZX, cs.x86.X86_OP_REG, cs.CS_OP_MEM):
             # ----------------------------------------------------
             # movzx reg, [vip_reg]
@@ -486,7 +487,7 @@ def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollectio
     def_reg = X86Reg.from_capstone(def_reg_i.operands[0].reg)
     out_size = def_reg_i.operands[1].size
 
-    def _decryption_begin_finder(i):
+    def _decryption_begin_finder(i) -> bool:
         # ----------------------------------------------------
         # xor vkr_reg, def_reg
         # ----------------------------------------------------
@@ -494,7 +495,7 @@ def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollectio
                def_reg.is_equal_to_capstone(i.operands[0].reg) and \
                state.vrk_reg.is_equal_to_capstone(i.operands[1].reg)
 
-    def _decryption_end_finder_1(i):
+    def _decryption_end_finder_1(i) -> bool:
         if imatch(i, cs.x86.X86_INS_XOR, cs.x86.X86_OP_REG, cs.x86.X86_OP_REG):
             # ----------------------------------------------------
             # xor def_reg, vrk_reg
@@ -502,7 +503,7 @@ def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollectio
             return state.vrk_reg.is_equal_to_capstone(i.operands[0].reg)
         return False
 
-    def _decryption_end_finder_2(i):
+    def _decryption_end_finder_2(i) -> bool:
         if imatch(i, cs.x86.X86_INS_XOR, cs.CS_OP_MEM, cs.x86.X86_OP_REG):
             # ----------------------------------------------------
             # push vrk_reg
@@ -524,7 +525,7 @@ def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollectio
     end_idx = ic.next_index_by(begin_idx + 1, _decryption_end_finder_2, barrier_idx)
 
     if end_idx != -1:
-        def _pop_finder(i):
+        def _pop_finder(i) -> bool:
             return imatch(i, cs.x86.X86_INS_POP, cs.x86.X86_OP_REG) and \
                     i.operands[0].reg == state.vrk_reg.capstone
         end_idx = ic.next_index_by(end_idx + 1, _pop_finder, barrier_idx)
@@ -543,10 +544,10 @@ def _next_decryption_block(state: VMState, cursor: int, ic: InstructionCollectio
     return d_block
 
 
-def _next_decrypted(state: VMState, cursor: int, ic: InstructionCollection):
+def _next_decrypted(state: VMState, cursor: int, ic: InstructionCollection) -> Optional[VMDecryptedInfo]:
     d_blk = _next_decryption_block(state, cursor, ic)
     if d_blk is None:
-        return -1, None
+        return None
 
     info = _decrypt(state, d_blk)
     return info
@@ -555,7 +556,7 @@ def _next_decrypted(state: VMState, cursor: int, ic: InstructionCollection):
 class VMEntryParser:
 
     @classmethod
-    def _get_encrypted_vip(cls, ic: InstructionCollection):
+    def _find_encrypted_vip(cls, ic: InstructionCollection) -> (int, int):
         # ----------------------------------------------------
         # push XXXXXX
         # ----------------------------------------------------
@@ -563,7 +564,7 @@ class VMEntryParser:
         return 0, ic[0].operands[0].imm
 
     @classmethod
-    def _get_vip_reg(cls, cursor: int, ic: InstructionCollection):
+    def _find_vip_reg(cls, cursor: int, ic: InstructionCollection) -> (int, X86Reg):
         def _finder(i):
             # ----------------------------------------------------
             # mov r64, [rsp + 0x90]
@@ -578,7 +579,7 @@ class VMEntryParser:
         return idx, X86Reg.from_capstone(reg_i.operands[0].reg).extended
 
     @classmethod
-    def _get_vsp_reg(cls, cursor: int, ic: InstructionCollection):
+    def _find_vsp_reg(cls, cursor: int, ic: InstructionCollection) -> (int, X86Reg):
         def _finder(i):
             # ----------------------------------------------------
             # mov r64, rsp
@@ -591,7 +592,7 @@ class VMEntryParser:
         return idx, X86Reg.from_capstone(reg_i.operands[0].reg).extended
 
     @classmethod
-    def _get_vrk_reg(cls, cursor: int, vip_reg: X86Reg, ic: InstructionCollection):
+    def _find_vrk_reg(cls, cursor: int, vip_reg: X86Reg, ic: InstructionCollection) -> (int, X86Reg):
         def _finder(i):
             # ----------------------------------------------------
             # mov r64, vip_reg
@@ -604,7 +605,7 @@ class VMEntryParser:
         return idx, X86Reg.from_capstone(reg_i.operands[0].reg).extended
 
     @classmethod
-    def _get_reloc_rva(cls, cursor: int, ic: InstructionCollection):
+    def _find_reloc_rva(cls, cursor: int, ic: InstructionCollection) -> (int, int):
         def _finder(i):
             # ----------------------------------------------------
             # lea r64, [rip - im]
@@ -624,8 +625,8 @@ class VMEntryParser:
     """
 
     @classmethod
-    def _decrypt_vip(cls, encrypted_vip: int, vip_reg: X86Reg,
-                     vip_i_idx, vsp_id_idx, ic: InstructionCollection):
+    def _decrypt_vip(cls, encrypted_vip: int, vip_reg: X86Reg,vip_i_idx, vsp_id_idx,
+                     ic: InstructionCollection) -> int:
         sub_ic, depends = ic.trace(vip_reg, vip_i_idx + 1, vsp_id_idx - 1)
         assert len(sub_ic) and "can not decrypt vip"
 
@@ -635,12 +636,12 @@ class VMEntryParser:
         return out_reg_values[vip_reg]
 
     @classmethod
-    def parse(cls, binary: Binary, ic: InstructionCollection):
-        encrypted_vip_idx, encrypted_vip = cls._get_encrypted_vip(ic)
-        vip_i_idx, vip_reg = cls._get_vip_reg(encrypted_vip_idx + 1, ic)
-        vsp_i_idx, vsp_reg = cls._get_vsp_reg(vip_i_idx + 1, ic)
-        vrk_i_idx, vrk_reg = cls._get_vrk_reg(vsp_i_idx + 1, vip_reg, ic)
-        reloc_rva_i_idx, reloc_rva = cls._get_reloc_rva(vrk_i_idx + 1, ic)
+    def parse(cls, binary: Binary, ic: InstructionCollection) -> (VMState, int):
+        encrypted_vip_idx, encrypted_vip = cls._find_encrypted_vip(ic)
+        vip_i_idx, vip_reg = cls._find_vip_reg(encrypted_vip_idx + 1, ic)
+        vsp_i_idx, vsp_reg = cls._find_vsp_reg(vip_i_idx + 1, ic)
+        vrk_i_idx, vrk_reg = cls._find_vrk_reg(vsp_i_idx + 1, vip_reg, ic)
+        reloc_rva_i_idx, reloc_rva = cls._find_reloc_rva(vrk_i_idx + 1, ic)
 
         loaded_vip_va = cls._decrypt_vip(encrypted_vip, vip_reg, vip_i_idx, vsp_i_idx, ic)
 
@@ -667,7 +668,7 @@ class VMSwapParser:
             self.prefix_ic = prefix_ic
 
     @classmethod
-    def _find_self_ref(cls, state: VMState, ic: InstructionCollection):
+    def _find_self_ref(cls, state: VMState, ic: InstructionCollection) -> Optional[int]:
         def _finder(i):
             # ----------------------------------------------------
             # lea r64, [$]
@@ -684,7 +685,7 @@ class VMSwapParser:
             return def_i.address
 
     @classmethod
-    def try_parse(cls, state: VMState, ic: InstructionCollection):
+    def try_parse(cls, state: VMState, ic: InstructionCollection) -> Optional[Result]:
         reloc_rva = cls._find_self_ref(state, ic)
         if reloc_rva is None:
             return None
@@ -771,11 +772,11 @@ class VMSwapParser:
         else:
             return None
 
-# tracer = None
+
 class VMHandlerParser:
 
     @classmethod
-    def _all_decryption_blocks(cls, state: VMState, ic: InstructionCollection):
+    def _all_decryption_blocks(cls, state: VMState, ic: InstructionCollection) -> [VMDecryptionBlock]:
         d_blks = []
         cursor = 0
         while True:

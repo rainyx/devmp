@@ -4,7 +4,7 @@ from universal import X86Reg
 from lief.PE import Binary
 import struct as st
 
-from utils import InstructionCollection
+from utils import InstructionCollection, unpack_int
 
 INVALID_RVA = -1
 
@@ -95,17 +95,7 @@ class VMState:
             data_off -= out_size
 
         data_bytes = self._vip_sec.content[data_off:data_off + out_size].tobytes()
-        if out_size == 1:
-            data = st.unpack('<B', data_bytes)[0]
-        elif out_size == 2:
-            data = st.unpack('<H', data_bytes)[0]
-        elif out_size == 4:
-            data = st.unpack('<I', data_bytes)[0]
-        elif out_size == 8:
-            data = st.unpack('<Q', data_bytes)[0]
-        else:
-            raise Exception("Incorrect val_sz: " + str(out_size))
-
+        data = unpack_int(data_bytes, out_size)
         self._forward(out_size)
         return data
 
