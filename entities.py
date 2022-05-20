@@ -191,6 +191,115 @@ class VMInstruction:
         return f"[VMInst 0x{id(self):x}] OP: {self.op} OPS: {', '.join(map(str, self.parameters))} "
 
 
+class VMOpcodes(enum.Enum):
+    VUNK = "VUNK"
+
+    VPOPVB = "VPOPVB"
+    VPOPVW = "VPOPVW"
+    VPOPVD = "VPOPVD"
+    VPOPVQ = "VPOPVQ"
+
+    VPOPDB = "VPOPDB"
+    VPOPDW = "VPOPDW"
+    VPOPDD = "VPOPDD"
+    VPOPDQ = "VPOPDQ"
+
+    VPUSHCB = "VPUSHCB"
+    VPUSHCW = "VPUSHCW"
+    VPUSHCD = "VPUSHCD"
+    VPUSHCQ = "VPUSHCQ"
+
+    VPUSHVB = "VPUSHVB"
+    VPUSHVW = "VPUSHVW"
+    VPUSHVD = "VPUSHVD"
+    VPUSHVQ = "VPUSHVQ"
+
+    VPUSHRB = "VPUSHRB"
+    VPUSHRW = "VPUSHRW"
+    VPUSHRD = "VPUSHRD"
+    VPUSHQ = "VPUSHQ"
+
+    VADDUB = "VADDUB"
+    VADDUW = "VADDUW"
+    VADDUD = "VADDUD"
+    VADDUQ = "VADDUQ"
+
+    VIMULUB = "VIMULUB"
+    VIMULUW = "VIMULUW"
+    VIMULUD = "VIMULUD"
+    VIMULUQ = "VIMULUQ"
+
+    VIDIVUB = "VIDIVUB"
+    VIDIVUW = "VIDIVUW"
+    VIDIVUD = "VIDIVUD"
+    VIDIVUQ = "VIDIVUQ"
+
+    VMULUB = "VMULUB"
+    VMULUW = "VMULUW"
+    VMULUD = "VMULUD"
+    VMULUQ = "VMULUQ"
+
+    VDIVUB = "VDIVUB"
+    VDIVUW = "VDIVUW"
+    VDIVUD = "VDIVUD"
+    VDIVUQ = "VDIVUQ"
+
+    VNORUB = "VNORUB"
+    VNORUW = "VNORUW"
+    VNORUD = "VNORUD"
+    VNORUQ = "VNORUQ"
+
+    VANDUB = "VANDUB"
+    VANDUW = "VANDUW"
+    VANDUD = "VANDUD"
+    VANDUQ = "VANDUQ"
+
+    VSHRUB = "VSHRUB"
+    VSHRUW = "VSHRUW"
+    VSHRUD = "VSHRUD"
+    VSHRUQ = "VSHRUQ"
+
+    VSHLUB = "VSHLUB"
+    VSHLUW = "VSHLUW"
+    VSHLUD = "VSHLUD"
+    VSHLUQ = "VSHLUQ"
+
+    VSHRDUB = "VSHRDUB"
+    VSHRDUW = "VSHRDUW"
+    VSHRDUD = "VSHRDUD"
+    VSHRDUQ = "VSHRDUQ"
+
+    VSHLDUB = "VSHLDUB"
+    VSHLDUW = "VSHLDUW"
+    VSHLDUD = "VSHLDUD"
+    VSHLDUQ = "VSHLDUQ"
+
+    VREADUB = "VREADUB"
+    VREADUW = "VREADUW"
+    VREADUD = "VREADUD"
+    VREADUQ = "VREADUQ"
+
+    VWRITEUB = "VWRITEUB"
+    VWRITEUW = "VWRITEUW"
+    VWRITEUD = "VWRITEUD"
+    VWRITEUQ = "VWRITEUQ"
+
+    VLOCKXCHGUB = "VLOCKXCHGUB"
+    VLOCKXCHGUW = "VLOCKXCHGUW"
+    VLOCKXCHGUD = "VLOCKXCHGUD"
+    VLOCKXCHGUQ = "VLOCKXCHGUQ"
+
+    VCPUID = "VCPUID"
+    VCPUIDX = "VCPUIDX"
+
+    VRDTSC = "VRDTSC"
+    VSETVSP = "VSETVSP"
+    VJMP = "VJMP"
+    VNOP = "VNOP"
+    VPUSHCR0 = "VPUSHCR0"
+    VPUSHCR3 = "VPUSHCR3"
+
+
 class VMHandler:
 
     def __init__(self, rva, next_rva: int, operands: [int], v_inst: VMInstruction, ic: InstructionCollection):

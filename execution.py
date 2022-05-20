@@ -5,13 +5,25 @@ import unicorn as uc
 import unicorn.x86_const as uc_x86
 import capstone as cs
 import capstone.x86 as cs_x86
+import struct as st
 
 from entities import VMState, VMBasicBlock
 from universal import X86Reg
-from utils import imatch, unpack_int, str_to_cs_inst
+from utils import imatch, unpack_int, str_to_cs_inst, format_eflags
 
 
 _1MB = 1024 * 1024
+
+
+class VMTracer:
+    def on_v_inst(self, mu: uc.Uc, state: VMState):
+        v = mu.reg_read(uc_x86.UC_X86_REG_EFLAGS)
+        print(f"  ==== EFLAGS: 0x{v:08x} {format_eflags(v)}")
+        print("  ==== VSP:")
+        for i in range(0, 5):
+            addr = mu.reg_read(state.vsp_reg.unicorn) + 8 * i
+            v = st.unpack("<Q", mu.mem_read(addr, 8))[0]
+            print(f"  SP_{i}: [0x{addr:08x}] 0x{v:x}")
 
 
 class VMSymbolicExecutor:
@@ -235,7 +247,6 @@ class VMBranchAnalyzer:
 
         dest_expr = e_state.get_symbolic_register(X86Reg.RAX)
         dest_expr = z3.simplify(dest_expr)
-
         cnd = cls._find_condition(dest_expr)
 
         if cnd is None:
@@ -244,6 +255,7 @@ class VMBranchAnalyzer:
         else:
             inv_cnd = z3.simplify(~cnd)
             cnd_val = z3.BitVec("cond_val", cnd.size())
+
             dest_expr = z3.substitute(dest_expr, (cnd, cnd_val))
             dest_expr = z3.substitute(dest_expr, (inv_cnd, ~cnd_val))
             dest_expr = e_state.substitute_all_constants(dest_expr)

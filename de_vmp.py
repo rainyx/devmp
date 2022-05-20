@@ -13,7 +13,7 @@ from subroutines import VMEntryParser, VMHandlerParser
 from universal import X86Reg
 from utils import imatch, InstructionCollection, Mod2NInt, get_shared_md, emulate_shared
 
-vmp_bin_file_path = os.path.join(os.path.dirname(__file__), "vmtest.vmp.exe")
+vmp_bin_file_path = os.path.join(os.path.dirname(__file__), "vmtest.vmp2.exe")
 
 
 class VMP:
@@ -95,8 +95,8 @@ class VMP:
         initial_state = state.duplicate()
         vm_bb = VMBasicBlock()
         while True:
-            # print(f"Unroll 0x{handler_rva:x}, VIP: 0x{state.vip_rva:x}, VRK: 0x{state.rolling_key:x}, "
-            #       f"VIP_REG: {state.vip_reg}, VSP_REG: {state.vsp_reg}, VRK_REG: {state.vrk_reg}")
+            print(f"Unroll 0x{handler_rva:x}, VIP: 0x{state.vip_rva:x}, VRK: 0x{state.rolling_key:x}, "
+                  f"VIP_REG: {state.vip_reg}, VSP_REG: {state.vsp_reg}, VRK_REG: {state.vrk_reg}")
             ic = self._deobfuscate(handler_rva, debug=False)
             handler = VMHandlerParser.try_parse(state, handler_rva, initial_state, vm_bb, ic)
 
@@ -122,14 +122,14 @@ class VMP:
         #                 vip_direction=VIPDirection.BACKWARD)
         # first_handler_rva = 0xd896a
         # state = VMState(binary=self.binary,
-        #                 vsp_reg=X86Reg.RBX,
+        #                 vsp_reg=X86Reg.R11,
         #                 vip_reg=X86Reg.R9,
-        #                 vrk_reg=X86Reg.RDI,
-        #                 vip_rva=0x5c74,
-        #                 rolling_key=0xfffffffffff16f8a,
+        #                 vrk_reg=X86Reg.RBX,
+        #                 vip_rva=0x4000,
+        #                 rolling_key=0x1400f897a,
         #                 reloc_rva=INVALID_RVA,
         #                 vip_direction=VIPDirection.BACKWARD)
-        # first_handler_rva = 0x1529a
+        # first_handler_rva = 0x2bbeb
         self._unroll(state, first_handler_rva)
 
     def process(self):

@@ -328,7 +328,7 @@ class InstructionCollection:
         return self.__class__(self._insts[:end_idx])
 
     def range_of(self, begin_idx, end_idx):
-        return self.__class__(self._insts[begin_idx:end_idx])
+        return self.__class__(self._insts[begin_idx:end_idx + 1])
 
     def __getitem__(self, item):
         return self._insts[item]
@@ -372,3 +372,27 @@ def str_to_cs_inst(inst_str: str, address: int = 0) -> cs.CsInsn:
     code_bytes = bytes(a.asm(inst_str.encode('utf-8'))[0])
     inst = next(d.disasm(code_bytes, address))
     return inst
+
+
+def format_eflags(eflags: int) -> str:
+    flags = []
+    if eflags & 0x1:
+        flags.append("CF")
+    if eflags & 0x4:
+        flags.append("PF")
+    if eflags & 0x10:
+        flags.append("AF")
+    if eflags & 0x40:
+        flags.append("ZF")
+    if eflags & 0x80:
+        flags.append("SF")
+    if eflags & 0x100:
+        flags.append("TF")
+    if eflags & 0x200:
+        flags.append("IF")
+    if eflags & 0x400:
+        flags.append("DF")
+    if eflags & 0x800:
+        flags.append("OF")
+
+    return "|".join(flags)
